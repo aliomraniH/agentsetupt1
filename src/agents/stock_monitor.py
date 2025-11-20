@@ -251,6 +251,22 @@ class StockMonitorAgent(BaseAgent):
                     # Calculate previous close from percent change
                     previous_close = current_price / (1 + change_percent/100)
 
+                # Normalize prices - detect if prices are in cents/pennies (100x too high)
+                # Most stocks trade between $1 and $2000. If price > 2000, likely in cents
+                if current_price and current_price > 2000:
+                    # Check if dividing by 100 makes more sense based on change percent
+                    if change_percent and abs(change_percent) < 20:  # Reasonable daily change
+                        current_price = current_price / 100
+                        if previous_close:
+                            previous_close = previous_close / 100
+                        if change:
+                            change = change / 100
+
+                # Recalculate if we normalized
+                if current_price and previous_close:
+                    change = current_price - previous_close
+                    change_percent = (change / previous_close) * 100
+
                 return {
                     "symbol": symbol,
                     "name": symbol,
