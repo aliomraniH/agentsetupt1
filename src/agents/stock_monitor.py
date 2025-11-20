@@ -131,74 +131,114 @@ class StockMonitorAgent(BaseAgent):
 
                 soup = BeautifulSoup(response.text, 'lxml')
 
-                # Extract current price - try multiple methods
+                # Method 1: Try to extract from embedded JSON (most reliable)
                 current_price = None
+                change = None
+                change_percent = None
+                previous_close = None
+                volume = None
 
-                # Method 1: fin-streamer with data-symbol
-                price_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketPrice'})
-                if price_element:
-                    try:
-                        current_price = float(price_element.text.replace(',', ''))
-                    except:
-                        pass
+                # Look for script tags containing JSON data
+                scripts = soup.find_all('script')
+                for script in scripts:
+                    if script.string and 'root.App.main' in script.string:
+                        try:
+                            # Extract JSON from the script
+                            import json
+                            import re
 
-                # Method 2: fin-streamer without data-symbol
+                            # Find the JSON object
+                            match = re.search(r'root\.App\.main\s*=\s*({.*?});', script.string, re.DOTALL)
+                            if match:
+                                data = json.loads(match.group(1))
+
+                                # Navigate to quote data
+                                if 'context' in data and 'dispatcher' in data['context']:
+                                    stores = data['context']['dispatcher']['stores']
+                                    if 'QuoteSummaryStore' in stores:
+                                        quote_data = stores['QuoteSummaryStore']
+
+                                        # Extract price data
+                                        if 'price' in quote_data:
+                                            price_info = quote_data['price']
+                                            current_price = price_info.get('regularMarketPrice', {}).get('raw')
+                                            change = price_info.get('regularMarketChange', {}).get('raw')
+                                            change_percent = price_info.get('regularMarketChangePercent', {}).get('raw')
+                                            previous_close = price_info.get('regularMarketPreviousClose', {}).get('raw')
+                                            volume = price_info.get('regularMarketVolume', {}).get('raw')
+
+                                        break
+                        except Exception as e:
+                            logger.debug(f"Failed to parse JSON for {symbol}: {e}")
+                            continue
+
+                # Method 2: Extract current price from HTML - try multiple selectors
                 if not current_price:
-                    price_element = soup.find('fin-streamer', {'data-field': 'regularMarketPrice'})
+                    # Try fin-streamer with data-symbol
+                    price_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketPrice'})
                     if price_element:
                         try:
                             current_price = float(price_element.text.replace(',', ''))
                         except:
                             pass
 
-                # Method 3: Look for price in specific div/span patterns
-                if not current_price:
-                    for tag in soup.find_all(['span', 'div'], class_=lambda x: x and 'price' in x.lower() if x else False):
+                    # Try fin-streamer without data-symbol
+                    if not current_price:
+                        price_element = soup.find('fin-streamer', {'data-field': 'regularMarketPrice'})
+                        if price_element:
+                            try:
+                                current_price = float(price_element.text.replace(',', ''))
+                            except:
+                                pass
+
+                    # Look for price in specific div/span patterns
+                    if not current_price:
+                        for tag in soup.find_all(['span', 'div'], class_=lambda x: x and 'price' in x.lower() if x else False):
+                            try:
+                                text = tag.text.strip().replace(',', '').replace('$', '')
+                                if text and text[0].isdigit():
+                                    current_price = float(text)
+                                    break
+                            except:
+                                continue
+
+                # Extract change from HTML if not from JSON
+                if change is None:
+                    change_element = soup.find('fin-streamer', {'data-field': 'regularMarketChange'})
+                    if change_element:
                         try:
-                            text = tag.text.strip().replace(',', '').replace('$', '')
-                            if text and text[0].isdigit():
-                                current_price = float(text)
-                                break
+                            change = float(change_element.text.replace(',', ''))
                         except:
-                            continue
+                            pass
 
-                # Extract change
-                change = None
-                change_element = soup.find('fin-streamer', {'data-field': 'regularMarketChange'})
-                if change_element:
-                    try:
-                        change = float(change_element.text.replace(',', ''))
-                    except:
-                        pass
+                # Extract change percent from HTML if not from JSON
+                if change_percent is None:
+                    change_pct_element = soup.find('fin-streamer', {'data-field': 'regularMarketChangePercent'})
+                    if change_pct_element:
+                        try:
+                            change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
+                            change_percent = float(change_pct_text)
+                        except:
+                            pass
 
-                # Extract change percent
-                change_percent = None
-                change_pct_element = soup.find('fin-streamer', {'data-field': 'regularMarketChangePercent'})
-                if change_pct_element:
-                    try:
-                        change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
-                        change_percent = float(change_pct_text)
-                    except:
-                        pass
+                # Extract previous close from HTML if not from JSON
+                if previous_close is None:
+                    prev_close_element = soup.find('td', {'data-test': 'PREV_CLOSE-value'})
+                    if prev_close_element:
+                        try:
+                            previous_close = float(prev_close_element.text.replace(',', ''))
+                        except:
+                            pass
 
-                # Extract previous close
-                previous_close = None
-                prev_close_element = soup.find('td', {'data-test': 'PREV_CLOSE-value'})
-                if prev_close_element:
-                    try:
-                        previous_close = float(prev_close_element.text.replace(',', ''))
-                    except:
-                        pass
-
-                # Extract volume
-                volume = None
-                volume_element = soup.find('fin-streamer', {'data-field': 'regularMarketVolume'})
-                if volume_element:
-                    try:
-                        volume_text = volume_element.text.replace(',', '')
-                        volume = int(volume_text) if volume_text else None
-                    except:
-                        pass
+                # Extract volume from HTML if not from JSON
+                if volume is None:
+                    volume_element = soup.find('fin-streamer', {'data-field': 'regularMarketVolume'})
+                    if volume_element:
+                        try:
+                            volume_text = volume_element.text.replace(',', '')
+                            volume = int(volume_text) if volume_text else None
+                        except:
+                            pass
 
                 # Calculate missing values
                 if current_price and previous_close and change is None:
