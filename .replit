@@ -1,5 +1,7 @@
-run = "pip install -r requirements.txt && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
+run = "python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
 entrypoint = "src/core/server.py"
+
+onBoot = "python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt"
 
 [nix]
 channel = "stable-23_11"
@@ -7,17 +9,11 @@ channel = "stable-23_11"
 [env]
 PYTHONPATH = "${REPL_HOME}"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
-
-[packager]
-language = "python3"
-
-[packager.features]
-enabledForHosting = true
-packageSearch = true
-guessImports = true
+VIRTUAL_ENV = "${REPL_HOME}/.venv"
+PATH = "${VIRTUAL_ENV}/bin:${PATH}"
 
 [deployment]
-run = ["python", "-m", "uvicorn", "src.core.server:app", "--host", "0.0.0.0", "--port", "8080"]
+run = ["/bin/sh", "-c", ". .venv/bin/activate && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080"]
 deploymentTarget = "autoscale"
 
 [[ports]]
