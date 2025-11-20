@@ -130,30 +130,75 @@ class StockMonitorAgent(BaseAgent):
                     return {"symbol": symbol, "error": f"HTTP {response.status_code}", "status": "error"}
 
                 soup = BeautifulSoup(response.text, 'lxml')
-                
-                # Extract current price
+
+                # Extract current price - try multiple methods
+                current_price = None
+
+                # Method 1: fin-streamer with data-symbol
                 price_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketPrice'})
-                current_price = float(price_element.text.replace(',', '')) if price_element else None
-                
+                if price_element:
+                    try:
+                        current_price = float(price_element.text.replace(',', ''))
+                    except:
+                        pass
+
+                # Method 2: fin-streamer without data-symbol
+                if not current_price:
+                    price_element = soup.find('fin-streamer', {'data-field': 'regularMarketPrice'})
+                    if price_element:
+                        try:
+                            current_price = float(price_element.text.replace(',', ''))
+                        except:
+                            pass
+
+                # Method 3: Look for price in specific div/span patterns
+                if not current_price:
+                    for tag in soup.find_all(['span', 'div'], class_=lambda x: x and 'price' in x.lower() if x else False):
+                        try:
+                            text = tag.text.strip().replace(',', '').replace('$', '')
+                            if text and text[0].isdigit():
+                                current_price = float(text)
+                                break
+                        except:
+                            continue
+
                 # Extract change
-                change_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketChange'})
-                change = float(change_element.text.replace(',', '')) if change_element else None
-                
+                change = None
+                change_element = soup.find('fin-streamer', {'data-field': 'regularMarketChange'})
+                if change_element:
+                    try:
+                        change = float(change_element.text.replace(',', ''))
+                    except:
+                        pass
+
                 # Extract change percent
-                change_pct_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketChangePercent'})
+                change_percent = None
+                change_pct_element = soup.find('fin-streamer', {'data-field': 'regularMarketChangePercent'})
                 if change_pct_element:
-                    change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
-                    change_percent = float(change_pct_text)
-                else:
-                    change_percent = None
-                
+                    try:
+                        change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
+                        change_percent = float(change_pct_text)
+                    except:
+                        pass
+
                 # Extract previous close
+                previous_close = None
                 prev_close_element = soup.find('td', {'data-test': 'PREV_CLOSE-value'})
-                previous_close = float(prev_close_element.text.replace(',', '')) if prev_close_element else None
-                
+                if prev_close_element:
+                    try:
+                        previous_close = float(prev_close_element.text.replace(',', ''))
+                    except:
+                        pass
+
                 # Extract volume
-                volume_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketVolume'})
-                volume = int(volume_element.text.replace(',', '')) if volume_element else None
+                volume = None
+                volume_element = soup.find('fin-streamer', {'data-field': 'regularMarketVolume'})
+                if volume_element:
+                    try:
+                        volume_text = volume_element.text.replace(',', '')
+                        volume = int(volume_text) if volume_text else None
+                    except:
+                        pass
 
                 # Calculate missing values
                 if current_price and previous_close and change is None:
@@ -162,6 +207,9 @@ class StockMonitorAgent(BaseAgent):
                     change_percent = (change / previous_close) * 100
                 if previous_close is None and current_price and change:
                     previous_close = current_price - change
+                elif change_percent and current_price and not previous_close:
+                    # Calculate previous close from percent change
+                    previous_close = current_price / (1 + change_percent/100)
 
                 return {
                     "symbol": symbol,
