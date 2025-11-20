@@ -251,21 +251,35 @@ class StockMonitorAgent(BaseAgent):
                     # Calculate previous close from percent change
                     previous_close = current_price / (1 + change_percent/100)
 
-                # Normalize prices - detect if prices are in cents/pennies (100x too high)
-                # Most stocks trade between $1 and $2000. If price > 2000, likely in cents
-                if current_price and current_price > 2000:
-                    # Check if dividing by 100 makes more sense based on change percent
-                    if change_percent and abs(change_percent) < 20:  # Reasonable daily change
-                        current_price = current_price / 100
-                        if previous_close:
-                            previous_close = previous_close / 100
-                        if change:
-                            change = change / 100
+                # Normalize prices - detect if prices are in wrong units
+                # Most major stocks trade between $10 and $1000. Outside this range needs validation.
+                if current_price:
+                    # If price > 2000, likely in cents (need to divide by 100)
+                    if current_price > 2000:
+                        if change_percent and abs(change_percent) < 20:  # Reasonable daily change
+                            current_price = current_price / 100
+                            if previous_close:
+                                previous_close = previous_close / 100
+                            if change:
+                                change = change / 100
+
+                    # If price is very low (< $5) for major tech stocks, might be missing a multiplier
+                    # But be careful - some stocks legitimately trade below $5
+                    # For now, we'll just log this for debugging
+                    if current_price < 10:
+                        logger.debug(f"{symbol} price seems low: ${current_price}")
 
                 # Recalculate if we normalized
                 if current_price and previous_close:
                     change = current_price - previous_close
                     change_percent = (change / previous_close) * 100
+
+                # Validation: Check if the data seems reasonable
+                if current_price:
+                    # If change_percent is extremely high but absolute change is tiny, data is suspect
+                    if change_percent and abs(change_percent) > 50 and change and abs(change) < 1:
+                        logger.warning(f"{symbol} suspicious data: {change_percent}% change but only ${change}")
+                        return {"symbol": symbol, "error": "Suspicious price data detected", "status": "error"}
 
                 return {
                     "symbol": symbol,
@@ -524,23 +538,56 @@ class StockMonitorAgent(BaseAgent):
 
         logger.info(f"[{self.name}] Fetching {len(stock_symbols)} stocks: {list_name}")
 
-        # Try web scraping first (most reliable)
+        # Try web scraping first (most reliable for real-time data)
         results_dict = await self._fetch_stocks_web_scraping(stock_symbols)
+
+        # Check which stocks succeeded/failed
+        failed_symbols = [symbol for symbol, data in results_dict.items() if data.get("status") == "error"]
+
+        # Detect suspicious data: check if multiple stocks have identical prices
+        # This suggests the scraper is picking up the wrong data
+        successful_scrapes = {symbol: data for symbol, data in results_dict.items()
+                            if data.get("status") == "success" and data.get("current_price") is not None}
+
+        if len(successful_scrapes) > 1:
+            prices = [data["current_price"] for data in successful_scrapes.values()]
+            # If we have duplicate prices, it's suspicious
+            if len(prices) != len(set(prices)):
+                price_counts = {}
+                for symbol, data in successful_scrapes.items():
+                    price = data["current_price"]
+                    if price not in price_counts:
+                        price_counts[price] = []
+                    price_counts[price].append(symbol)
+
+                # Find prices that appear for multiple symbols
+                for price, symbols_with_price in price_counts.items():
+                    if len(symbols_with_price) > 1:
+                        logger.warning(f"Suspicious: Multiple stocks with same price ${price}: {symbols_with_price}")
+                        # Mark these as failed so they get retried with yfinance
+                        for symbol in symbols_with_price:
+                            failed_symbols.append(symbol)
+                            results_dict[symbol] = {"symbol": symbol, "error": "Duplicate price detected", "status": "error"}
+
+        # If any stocks failed with web scraping, retry them with yfinance
+        if failed_symbols and yf is not None:
+            logger.info(f"Retrying {len(failed_symbols)} failed stocks with yfinance: {failed_symbols}")
+            yf_results = await self._fetch_batch_data(failed_symbols)
+
+            # Merge the successful yfinance results back into results_dict
+            for symbol in failed_symbols:
+                if yf_results[symbol].get("status") == "success":
+                    results_dict[symbol] = yf_results[symbol]
+                    logger.info(f"Successfully fetched {symbol} data from yfinance")
+
+        # Convert to list maintaining original order
         results = [results_dict[symbol] for symbol in stock_symbols]
 
-        # Check if web scraping was successful
+        # Final success/failure counts
         successful = [r for r in results if r.get("status") == "success"]
         failed = [r for r in results if r.get("status") == "error"]
 
-        # If web scraping failed for most stocks, try yfinance as fallback
-        if len(successful) < len(stock_symbols) / 2:
-            logger.warning(f"Web scraping failed for {len(failed)}/{len(stock_symbols)} stocks, trying yfinance")
-            results_dict = await self._fetch_batch_data(stock_symbols)
-            results = [results_dict[symbol] for symbol in stock_symbols]
-
-            # Re-evaluate success
-            successful = [r for r in results if r.get("status") == "success"]
-            failed = [r for r in results if r.get("status") == "error"]
+        logger.info(f"Final results: {len(successful)} successful, {len(failed)} failed")
 
         # Sort by change percentage
         sorted_by_change = sorted(
