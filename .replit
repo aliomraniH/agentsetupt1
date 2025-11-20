@@ -10,8 +10,8 @@ PYTHONPATH = "${REPL_HOME}"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 [deployment]
-build = ["sh", "-c", "python -m venv /tmp/venv && /tmp/venv/bin/pip install -r requirements.txt"]
-run = ["sh", "-c", "/tmp/venv/bin/python -m uvicorn src.core.server:app --host=0.0.0.0 --port=38833"]
+build = ["sh", "-c", "pip install --no-user -r requirements.txt"]
+run = ["python", "-m", "uvicorn", "src.core.server:app", "--host", "0.0.0.0", "--port", "8080"]
 deploymentTarget = "autoscale"
 
 [[ports]]
