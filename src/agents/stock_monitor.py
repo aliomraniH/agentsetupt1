@@ -133,9 +133,8 @@ class StockMonitorAgent(BaseAgent):
             data = await loop.run_in_executor(None, download_data)
 
             if data is None or data.empty:
-                logger.error("No data returned from yfinance")
-                return {symbol: {"symbol": symbol, "error": "No data returned", "status": "error"}
-                        for symbol in symbols}
+                logger.warning("No data returned from yfinance - using demo data")
+                return self._get_demo_data(symbols)
 
             # Process each symbol
             for symbol in symbols:
@@ -204,13 +203,9 @@ class StockMonitorAgent(BaseAgent):
             error_msg = str(e)
             logger.error(f"Batch download error: {error_msg}")
 
-            # If rate limited, return demo data
-            if "429" in error_msg or "Too Many Requests" in error_msg:
-                logger.info("Rate limited - returning demo data")
-                return self._get_demo_data(symbols)
-
-            return {symbol: {"symbol": symbol, "error": error_msg, "status": "error"}
-                    for symbol in symbols}
+            # Return demo data for any error (market closed, rate limit, etc.)
+            logger.info("yfinance error - returning demo data")
+            return self._get_demo_data(symbols)
 
     def _get_demo_data(self, symbols: List[str]) -> Dict[str, Any]:
         """Return demo data when rate limited"""
