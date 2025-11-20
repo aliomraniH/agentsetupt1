@@ -230,14 +230,25 @@ async def get_available_stock_lists():
 
 
 @router.get("/agents/stock-monitor/quick")
-async def quick_stock_check():
+async def quick_stock_check(
+    skip_cache: bool = False,
+    debug: bool = False
+):
     """
     Quick check of top tech stocks.
 
     Convenience endpoint that returns top 10 tech stocks immediately.
     Ideal for quick queries from Claude Chat.
+
+    Args:
+        skip_cache: Set to true to bypass cache and fetch fresh data
+        debug: Set to true to include debug metadata (data sources, validations, etc.)
     """
-    result = await stock_monitor_agent.execute(category="top_tech")
+    result = await stock_monitor_agent.execute(
+        category="top_tech",
+        skip_cache=skip_cache,
+        debug=debug
+    )
     return result
 
 

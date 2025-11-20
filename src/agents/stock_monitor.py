@@ -504,6 +504,8 @@ class StockMonitorAgent(BaseAgent):
         category: str = "top_tech",
         symbols: Optional[List[str]] = None,
         format_for_claude: bool = True,
+        skip_cache: bool = False,
+        debug: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -513,10 +515,20 @@ class StockMonitorAgent(BaseAgent):
             category: Pre-defined category (top_tech, top_sp500, top_diversified)
             symbols: Custom list of stock symbols (overrides category)
             format_for_claude: Include Claude-friendly text summary
+            skip_cache: If True, bypass cache and fetch fresh data
+            debug: If True, include debug metadata (data sources, validation results)
 
         Returns:
             Dict containing stock data for all requested symbols
         """
+        # Initialize debug metadata
+        debug_metadata = {
+            "cache_used": False,
+            "data_sources": {},
+            "validation_warnings": [],
+            "fetch_order": []
+        } if debug else None
+
         # Determine which symbols to fetch
         if symbols:
             stock_symbols = [s.upper() for s in symbols[:20]]
@@ -531,19 +543,42 @@ class StockMonitorAgent(BaseAgent):
         # Create cache key
         cache_key = ",".join(sorted(stock_symbols))
 
-        # Check cache
-        if self._is_cache_valid(cache_key):
+        # Check cache (unless skip_cache is True)
+        if not skip_cache and self._is_cache_valid(cache_key):
             logger.info(f"[{self.name}] Returning cached data for {list_name}")
-            return self._cache[cache_key]
+            cached_result = self._cache[cache_key]
+            if debug_metadata:
+                cached_result["_debug"] = {
+                    "cache_used": True,
+                    "cache_age_seconds": (datetime.now(timezone.utc) - self._cache_time).total_seconds(),
+                    "note": "This is cached data. Use ?skip_cache=true to fetch fresh data."
+                }
+            return cached_result
 
-        logger.info(f"[{self.name}] Fetching {len(stock_symbols)} stocks: {list_name}")
+        if skip_cache:
+            logger.info(f"[{self.name}] Cache bypassed - fetching fresh data for {list_name}")
+        else:
+            logger.info(f"[{self.name}] Cache miss - fetching {len(stock_symbols)} stocks: {list_name}")
+
+        if debug_metadata:
+            debug_metadata["fetch_order"].append("Starting fresh data fetch")
 
         # Strategy: Try yfinance first (more reliable official API), then web scraping as fallback
         if yf is not None:
             logger.info("Using yfinance as primary data source")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Attempting yfinance for all symbols")
             results_dict = await self._fetch_batch_data(stock_symbols)
+
+            # Track which stocks succeeded with yfinance
+            if debug_metadata:
+                for symbol, data in results_dict.items():
+                    if data.get("status") == "success":
+                        debug_metadata["data_sources"][symbol] = "yfinance"
         else:
             logger.warning("yfinance not available, using web scraping only")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("yfinance not available - will use web scraping")
             results_dict = {}
 
         # Check which stocks succeeded/failed with yfinance
@@ -557,6 +592,8 @@ class StockMonitorAgent(BaseAgent):
         # If any stocks failed with yfinance, try web scraping as fallback
         if failed_symbols:
             logger.info(f"Retrying {len(failed_symbols)} failed stocks with web scraping: {failed_symbols}")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with web scraping: {failed_symbols}")
             scraping_results = await self._fetch_stocks_web_scraping(failed_symbols)
 
             # Merge successful scraping results back
@@ -564,9 +601,13 @@ class StockMonitorAgent(BaseAgent):
                 if scraping_results[symbol].get("status") == "success":
                     results_dict[symbol] = scraping_results[symbol]
                     logger.info(f"Successfully fetched {symbol} data from web scraping")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "web_scraping"
                 elif symbol not in results_dict:
                     # Keep the error result
                     results_dict[symbol] = scraping_results[symbol]
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "failed"
 
         # Final validation: Detect suspicious data patterns
         successful_data = {symbol: data for symbol, data in results_dict.items()
@@ -592,9 +633,12 @@ class StockMonitorAgent(BaseAgent):
             if symbol in expected_ranges and price:
                 min_price, max_price = expected_ranges[symbol]
                 if price < min_price * 0.5 or price > max_price * 2:
-                    logger.error(f"Price out of range for {symbol}: ${price} (expected ${min_price}-${max_price})")
+                    warning_msg = f"{symbol}: Price ${price} outside typical range ${min_price}-${max_price}"
+                    logger.error(f"Price out of range - {warning_msg}")
                     # Mark as suspicious but keep the data with a warning
                     data["warning"] = f"Price ${price} outside typical range ${min_price}-${max_price}"
+                    if debug_metadata:
+                        debug_metadata["validation_warnings"].append(warning_msg)
 
         # Cross-check: detect if multiple stocks have identical prices (data quality issue)
         if len(successful_data) > 1:
@@ -610,11 +654,14 @@ class StockMonitorAgent(BaseAgent):
                 # Warn about duplicates
                 for price, symbols_with_price in price_counts.items():
                     if len(symbols_with_price) > 1:
-                        logger.error(f"DUPLICATE PRICES DETECTED - ${price}: {symbols_with_price}")
+                        warning_msg = f"DUPLICATE PRICES - ${price}: {symbols_with_price}"
+                        logger.error(warning_msg)
                         # Add warning to each affected stock
                         for sym in symbols_with_price:
                             if sym in successful_data:
                                 successful_data[sym]["warning"] = f"Duplicate price detected with {symbols_with_price}"
+                        if debug_metadata:
+                            debug_metadata["validation_warnings"].append(warning_msg)
 
         # Convert to list maintaining original order
         results = [results_dict[symbol] for symbol in stock_symbols]
@@ -668,8 +715,20 @@ class StockMonitorAgent(BaseAgent):
             claude_format = self._format_for_claude(result)
             result["claude_summary"] = claude_format["text_summary"]
 
-        # Cache the result
-        self._cache[cache_key] = result
+        # Add debug metadata if requested
+        if debug_metadata:
+            debug_metadata["summary"] = {
+                "yfinance_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
+                "web_scraping_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "web_scraping"),
+                "failed_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "failed"),
+                "validation_warnings_count": len(debug_metadata["validation_warnings"]),
+                "has_warnings": len(debug_metadata["validation_warnings"]) > 0
+            }
+            result["_debug"] = debug_metadata
+
+        # Cache the result (but don't cache debug metadata)
+        result_to_cache = {k: v for k, v in result.items() if k != "_debug"}
+        self._cache[cache_key] = result_to_cache
         self._cache_time = datetime.now(timezone.utc)
 
         return result
