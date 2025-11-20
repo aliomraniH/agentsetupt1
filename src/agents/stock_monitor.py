@@ -538,47 +538,83 @@ class StockMonitorAgent(BaseAgent):
 
         logger.info(f"[{self.name}] Fetching {len(stock_symbols)} stocks: {list_name}")
 
-        # Try web scraping first (most reliable for real-time data)
-        results_dict = await self._fetch_stocks_web_scraping(stock_symbols)
+        # Strategy: Try yfinance first (more reliable official API), then web scraping as fallback
+        if yf is not None:
+            logger.info("Using yfinance as primary data source")
+            results_dict = await self._fetch_batch_data(stock_symbols)
+        else:
+            logger.warning("yfinance not available, using web scraping only")
+            results_dict = {}
 
-        # Check which stocks succeeded/failed
+        # Check which stocks succeeded/failed with yfinance
         failed_symbols = [symbol for symbol, data in results_dict.items() if data.get("status") == "error"]
 
-        # Detect suspicious data: check if multiple stocks have identical prices
-        # This suggests the scraper is picking up the wrong data
-        successful_scrapes = {symbol: data for symbol, data in results_dict.items()
-                            if data.get("status") == "success" and data.get("current_price") is not None}
+        # Also check for missing symbols
+        for symbol in stock_symbols:
+            if symbol not in results_dict:
+                failed_symbols.append(symbol)
 
-        if len(successful_scrapes) > 1:
-            prices = [data["current_price"] for data in successful_scrapes.values()]
-            # If we have duplicate prices, it's suspicious
+        # If any stocks failed with yfinance, try web scraping as fallback
+        if failed_symbols:
+            logger.info(f"Retrying {len(failed_symbols)} failed stocks with web scraping: {failed_symbols}")
+            scraping_results = await self._fetch_stocks_web_scraping(failed_symbols)
+
+            # Merge successful scraping results back
+            for symbol in failed_symbols:
+                if scraping_results[symbol].get("status") == "success":
+                    results_dict[symbol] = scraping_results[symbol]
+                    logger.info(f"Successfully fetched {symbol} data from web scraping")
+                elif symbol not in results_dict:
+                    # Keep the error result
+                    results_dict[symbol] = scraping_results[symbol]
+
+        # Final validation: Detect suspicious data patterns
+        successful_data = {symbol: data for symbol, data in results_dict.items()
+                          if data.get("status") == "success" and data.get("current_price") is not None}
+
+        # Sanity check: Major tech stocks should be within reasonable price ranges
+        # This catches obviously wrong data (100x too high/low)
+        expected_ranges = {
+            "AAPL": (100, 300),    # Apple typically $150-250
+            "MSFT": (200, 500),    # Microsoft typically $300-450
+            "GOOGL": (80, 200),    # Alphabet typically $120-180
+            "AMZN": (100, 250),    # Amazon typically $130-200
+            "META": (200, 700),    # Meta typically $300-600
+            "TSLA": (150, 500),    # Tesla typically $200-400
+            "NVDA": (100, 300),    # Nvidia typically $150-250
+            "AMD": (50, 250),      # AMD typically $100-200
+            "INTC": (15, 80),      # Intel typically $20-50
+            "CRM": (150, 350)      # Salesforce typically $200-300
+        }
+
+        for symbol, data in successful_data.items():
+            price = data.get("current_price")
+            if symbol in expected_ranges and price:
+                min_price, max_price = expected_ranges[symbol]
+                if price < min_price * 0.5 or price > max_price * 2:
+                    logger.error(f"Price out of range for {symbol}: ${price} (expected ${min_price}-${max_price})")
+                    # Mark as suspicious but keep the data with a warning
+                    data["warning"] = f"Price ${price} outside typical range ${min_price}-${max_price}"
+
+        # Cross-check: detect if multiple stocks have identical prices (data quality issue)
+        if len(successful_data) > 1:
+            prices = [data["current_price"] for data in successful_data.values()]
             if len(prices) != len(set(prices)):
                 price_counts = {}
-                for symbol, data in successful_scrapes.items():
+                for symbol, data in successful_data.items():
                     price = data["current_price"]
                     if price not in price_counts:
                         price_counts[price] = []
                     price_counts[price].append(symbol)
 
-                # Find prices that appear for multiple symbols
+                # Warn about duplicates
                 for price, symbols_with_price in price_counts.items():
                     if len(symbols_with_price) > 1:
-                        logger.warning(f"Suspicious: Multiple stocks with same price ${price}: {symbols_with_price}")
-                        # Mark these as failed so they get retried with yfinance
-                        for symbol in symbols_with_price:
-                            failed_symbols.append(symbol)
-                            results_dict[symbol] = {"symbol": symbol, "error": "Duplicate price detected", "status": "error"}
-
-        # If any stocks failed with web scraping, retry them with yfinance
-        if failed_symbols and yf is not None:
-            logger.info(f"Retrying {len(failed_symbols)} failed stocks with yfinance: {failed_symbols}")
-            yf_results = await self._fetch_batch_data(failed_symbols)
-
-            # Merge the successful yfinance results back into results_dict
-            for symbol in failed_symbols:
-                if yf_results[symbol].get("status") == "success":
-                    results_dict[symbol] = yf_results[symbol]
-                    logger.info(f"Successfully fetched {symbol} data from yfinance")
+                        logger.error(f"DUPLICATE PRICES DETECTED - ${price}: {symbols_with_price}")
+                        # Add warning to each affected stock
+                        for sym in symbols_with_price:
+                            if sym in successful_data:
+                                successful_data[sym]["warning"] = f"Duplicate price detected with {symbols_with_price}"
 
         # Convert to list maintaining original order
         results = [results_dict[symbol] for symbol in stock_symbols]
