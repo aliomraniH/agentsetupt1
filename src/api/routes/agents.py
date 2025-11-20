@@ -6,9 +6,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 
-from src.agents import HealthMonitorAgent, StockMonitorAgent
+from src.agents import HealthMonitorAgent, StockMonitorAgent, NewsSearchAgent
 from src.agents.health_monitor import health_monitor_agent, ServiceType
 from src.agents.stock_monitor import stock_monitor_agent
+from src.agents.news_search import news_search_agent
 
 router = APIRouter()
 
@@ -35,6 +36,14 @@ class RunStockCheckRequest(BaseModel):
     symbols: Optional[List[str]] = None
 
 
+class RunNewsSearchRequest(BaseModel):
+    """Request to search news"""
+    symbols: Optional[List[str]] = None
+    company_names: Optional[List[str]] = None
+    sources: Optional[List[str]] = None
+    max_results_per_source: int = 3
+
+
 # ============== Agent Management ==============
 
 @router.get("/agents")
@@ -45,7 +54,8 @@ async def list_agents():
     """
     agents = [
         health_monitor_agent.get_info(),
-        stock_monitor_agent.get_info()
+        stock_monitor_agent.get_info(),
+        news_search_agent.get_info()
     ]
     return {
         "count": len(agents),
@@ -62,6 +72,8 @@ async def get_agent_info(agent_name: str):
         return health_monitor_agent.get_info()
     elif agent_name == "stock-monitor":
         return stock_monitor_agent.get_info()
+    elif agent_name == "news-search":
+        return news_search_agent.get_info()
 
     raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
 
@@ -226,4 +238,60 @@ async def quick_stock_check():
     Ideal for quick queries from Claude Chat.
     """
     result = await stock_monitor_agent.execute(category="top_tech")
+    return result
+
+
+# ============== News Search Agent ==============
+
+@router.post("/agents/news-search/run")
+async def run_news_search(request: RunNewsSearchRequest = None):
+    """
+    Search for stock-related news and videos.
+
+    Use this endpoint from Claude Chat to find recent news about stocks.
+
+    Sources:
+    - YouTube: Recent videos
+    - New York Times: News articles
+    - Wall Street Journal: Financial news
+
+    You can search by:
+    - Stock symbols (AAPL, GOOGL, etc.)
+    - Company names (Apple, Google, etc.)
+
+    Returns relevant links from the past few days.
+    """
+    if request:
+        result = await news_search_agent.execute(
+            symbols=request.symbols,
+            company_names=request.company_names,
+            sources=request.sources,
+            max_results_per_source=request.max_results_per_source
+        )
+    else:
+        result = await news_search_agent.execute()
+    return result
+
+
+@router.get("/agents/news-search/status")
+async def get_news_search_status():
+    """
+    Get the current status and last result of the news search agent.
+    """
+    info = news_search_agent.get_info()
+    info["last_result"] = news_search_agent.last_result
+    return info
+
+
+@router.get("/agents/news-search/quick")
+async def quick_news_search(symbols: str = "AAPL,GOOGL,MSFT"):
+    """
+    Quick news search for specified symbols.
+
+    Usage: /agents/news-search/quick?symbols=AAPL,GOOGL,TSLA
+
+    Default: Top tech stocks (AAPL, GOOGL, MSFT)
+    """
+    symbol_list = [s.strip().upper() for s in symbols.split(",")]
+    result = await news_search_agent.execute(symbols=symbol_list)
     return result
