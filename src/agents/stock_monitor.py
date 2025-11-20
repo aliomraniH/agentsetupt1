@@ -336,22 +336,26 @@ class StockMonitorAgent(BaseAgent):
 
             def download_data():
                 # Use download with specific parameters to avoid rate limits
+                # Use longer period to ensure we get data even when markets are closed
                 data = yf.download(
                     symbols_str,
-                    period="5d",
+                    period="2d",  # Get last 2 days to ensure we have recent data
                     interval="1d",
                     group_by="ticker",
                     auto_adjust=True,
                     progress=False,
-                    threads=False
+                    threads=False,
+                    prepost=True  # Include pre/post market data
                 )
                 return data
 
             data = await loop.run_in_executor(None, download_data)
 
             if data is None or data.empty:
-                logger.warning("No data returned from yfinance - using demo data")
-                return self._get_demo_data(symbols)
+                logger.error("yfinance returned empty data - all stocks failed")
+                # Return errors instead of demo data so web scraping can be tried
+                return {symbol: {"symbol": symbol, "error": "yfinance returned empty data", "status": "error"}
+                        for symbol in symbols}
 
             # Process each symbol
             for symbol in symbols:
@@ -420,9 +424,10 @@ class StockMonitorAgent(BaseAgent):
             error_msg = str(e)
             logger.error(f"Batch download error: {error_msg}")
 
-            # Return demo data for any error (market closed, rate limit, etc.)
-            logger.info("yfinance error - returning demo data")
-            return self._get_demo_data(symbols)
+            # Return errors instead of demo data - let web scraping be tried as fallback
+            logger.warning(f"yfinance failed with exception: {error_msg}")
+            return {symbol: {"symbol": symbol, "error": f"yfinance error: {error_msg}", "status": "error"}
+                    for symbol in symbols}
 
     def _get_demo_data(self, symbols: List[str]) -> Dict[str, Any]:
         """Return demo data when rate limited"""
@@ -671,6 +676,19 @@ class StockMonitorAgent(BaseAgent):
         failed = [r for r in results if r.get("status") == "error"]
 
         logger.info(f"Final results: {len(successful)} successful, {len(failed)} failed")
+
+        # Last resort: If EVERYTHING failed, use demo data
+        if len(successful) == 0:
+            logger.error("All data sources failed - using demo data as last resort")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("All sources failed - using demo data fallback")
+                # Mark all as demo data source
+                for symbol in stock_symbols:
+                    debug_metadata["data_sources"][symbol] = "demo_data_fallback"
+            demo_results = self._get_demo_data(stock_symbols)
+            results = [demo_results[symbol] for symbol in stock_symbols]
+            successful = [r for r in results if r.get("status") == "success"]
+            failed = []
 
         # Sort by change percentage
         sorted_by_change = sorted(
