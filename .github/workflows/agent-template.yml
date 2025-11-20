@@ -1,0 +1,87 @@
+name: Agent Template
+
+# This is a template workflow for new agents
+# Copy this file and customize for your specific agent
+
+on:
+  # Trigger on specific branch pushes for this agent
+  push:
+    branches:
+      - 'agents/YOUR-AGENT-NAME/**'
+    paths:
+      - 'src/agents/YOUR_AGENT_FILE.py'
+
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - run
+          - test
+          - deploy
+
+env:
+  PYTHON_VERSION: '3.11'
+  AGENT_NAME: 'your-agent-name'
+
+jobs:
+  run-agent:
+    name: Run Agent
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'run' || github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Agent
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          echo "🤖 Running ${{ env.AGENT_NAME }}"
+          echo ""
+
+          # Call the agent via API
+          URL="${BACKEND_URL:-http://localhost:8080}"
+
+          curl -X POST "$URL/api/v1/agents/${{ env.AGENT_NAME }}/run" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_KEY" \
+            | python -m json.tool
+
+  test-agent:
+    name: Test Agent
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'test'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Agent Tests
+        run: |
+          pytest tests/agents/test_${{ env.AGENT_NAME }}.py -v

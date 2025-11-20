@@ -1,0 +1,16 @@
+run = "python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
+entrypoint = "src/core/server.py"
+
+[nix]
+channel = "stable-23_11"
+
+[env]
+PYTHONPATH = "${REPL_HOME}"
+
+[deployment]
+run = ["python", "-m", "uvicorn", "src.core.server:app", "--host", "0.0.0.0", "--port", "8080"]
+deploymentTarget = "autoscale"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
