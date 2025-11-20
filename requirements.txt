@@ -29,3 +29,5 @@ typing-extensions==4.8.0
 
 # Stock data
 yfinance==0.2.33
+beautifulsoup4==4.12.2
+lxml==5.1.0

@@ -16,6 +16,13 @@ except ImportError:
     yf = None
     pd = None
 
+try:
+    import httpx
+    from bs4 import BeautifulSoup
+except ImportError:
+    httpx = None
+    BeautifulSoup = None
+
 from src.agents.base import BaseAgent
 
 
@@ -101,6 +108,98 @@ class StockMonitorAgent(BaseAgent):
             return False
         elapsed = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
         return elapsed < self._cache_ttl
+
+    async def _scrape_yahoo_finance(self, symbol: str) -> Dict[str, Any]:
+        """
+        Scrape stock data from Yahoo Finance website.
+        More reliable than yfinance API.
+        """
+        if httpx is None or BeautifulSoup is None:
+            return {"symbol": symbol, "error": "httpx or BeautifulSoup not installed", "status": "error"}
+
+        try:
+            url = f"https://finance.yahoo.com/quote/{symbol}"
+            
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code != 200:
+                    return {"symbol": symbol, "error": f"HTTP {response.status_code}", "status": "error"}
+
+                soup = BeautifulSoup(response.text, 'lxml')
+                
+                # Extract current price
+                price_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketPrice'})
+                current_price = float(price_element.text.replace(',', '')) if price_element else None
+                
+                # Extract change
+                change_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketChange'})
+                change = float(change_element.text.replace(',', '')) if change_element else None
+                
+                # Extract change percent
+                change_pct_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketChangePercent'})
+                if change_pct_element:
+                    change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
+                    change_percent = float(change_pct_text)
+                else:
+                    change_percent = None
+                
+                # Extract previous close
+                prev_close_element = soup.find('td', {'data-test': 'PREV_CLOSE-value'})
+                previous_close = float(prev_close_element.text.replace(',', '')) if prev_close_element else None
+                
+                # Extract volume
+                volume_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketVolume'})
+                volume = int(volume_element.text.replace(',', '')) if volume_element else None
+
+                # Calculate missing values
+                if current_price and previous_close and change is None:
+                    change = current_price - previous_close
+                if current_price and previous_close and change_percent is None:
+                    change_percent = (change / previous_close) * 100
+                if previous_close is None and current_price and change:
+                    previous_close = current_price - change
+
+                return {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "current_price": round(current_price, 2) if current_price else None,
+                    "previous_close": round(previous_close, 2) if previous_close else None,
+                    "change": round(change, 2) if change else 0,
+                    "change_percent": round(change_percent, 2) if change_percent else 0,
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume),
+                    "status": "success"
+                }
+
+        except Exception as e:
+            logger.error(f"Error scraping {symbol}: {e}")
+            return {"symbol": symbol, "error": str(e), "status": "error"}
+
+    async def _fetch_stocks_web_scraping(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using web scraping.
+        Fallback when yfinance fails.
+        """
+        logger.info(f"Fetching {len(symbols)} stocks via web scraping")
+        
+        # Scrape each stock with delay to avoid rate limiting
+        results = {}
+        for i, symbol in enumerate(symbols):
+            result = await self._scrape_yahoo_finance(symbol)
+            results[symbol] = result
+            
+            # Add small delay between requests to be polite
+            if i < len(symbols) - 1:
+                await asyncio.sleep(0.5)
+        
+        return results
+
+
+
 
     async def _fetch_batch_data(self, symbols: List[str]) -> Dict[str, Any]:
         """
@@ -321,13 +420,23 @@ class StockMonitorAgent(BaseAgent):
 
         logger.info(f"[{self.name}] Fetching {len(stock_symbols)} stocks: {list_name}")
 
-        # Fetch all stocks using batch download
-        results_dict = await self._fetch_batch_data(stock_symbols)
+        # Try web scraping first (most reliable)
+        results_dict = await self._fetch_stocks_web_scraping(stock_symbols)
         results = [results_dict[symbol] for symbol in stock_symbols]
 
-        # Separate successful and failed
+        # Check if web scraping was successful
         successful = [r for r in results if r.get("status") == "success"]
         failed = [r for r in results if r.get("status") == "error"]
+
+        # If web scraping failed for most stocks, try yfinance as fallback
+        if len(successful) < len(stock_symbols) / 2:
+            logger.warning(f"Web scraping failed for {len(failed)}/{len(stock_symbols)} stocks, trying yfinance")
+            results_dict = await self._fetch_batch_data(stock_symbols)
+            results = [results_dict[symbol] for symbol in stock_symbols]
+
+            # Re-evaluate success
+            successful = [r for r in results if r.get("status") == "success"]
+            failed = [r for r in results if r.get("status") == "error"]
 
         # Sort by change percentage
         sorted_by_change = sorted(
