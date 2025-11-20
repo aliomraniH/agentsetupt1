@@ -319,6 +319,72 @@ class StockMonitorAgent(BaseAgent):
 
 
 
+    async def _fetch_ticker_info(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using yfinance Ticker().info API.
+        This is an alternative method when download() fails.
+        """
+        if yf is None:
+            return {symbol: {"symbol": symbol, "error": "yfinance not installed", "status": "error"}
+                    for symbol in symbols}
+
+        results = {}
+        loop = asyncio.get_event_loop()
+
+        for symbol in symbols:
+            try:
+                def get_ticker_info():
+                    ticker = yf.Ticker(symbol)
+                    return ticker.info
+
+                info = await loop.run_in_executor(None, get_ticker_info)
+
+                if not info or 'currentPrice' not in info:
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": "No price data in ticker info",
+                        "status": "error"
+                    }
+                    continue
+
+                current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+                previous_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+
+                if not current_price or not previous_close:
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": "Missing price data",
+                        "status": "error"
+                    }
+                    continue
+
+                change = current_price - previous_close
+                change_percent = (change / previous_close) * 100 if previous_close else 0
+                volume = info.get('volume') or info.get('regularMarketVolume')
+
+                results[symbol] = {
+                    "symbol": symbol,
+                    "name": info.get('longName') or symbol,
+                    "current_price": round(float(current_price), 2),
+                    "previous_close": round(float(previous_close), 2),
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "volume": int(volume) if volume else None,
+                    "volume_formatted": self._format_volume(int(volume)) if volume else "N/A",
+                    "status": "success"
+                }
+                logger.info(f"Successfully fetched {symbol} via Ticker API")
+
+            except Exception as e:
+                logger.error(f"Ticker API error for {symbol}: {e}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"Ticker API error: {str(e)}",
+                    "status": "error"
+                }
+
+        return results
+
     async def _fetch_batch_data(self, symbols: List[str]) -> Dict[str, Any]:
         """
         Fetch data for multiple stocks using batch download.
@@ -586,7 +652,7 @@ class StockMonitorAgent(BaseAgent):
                 debug_metadata["fetch_order"].append("yfinance not available - will use web scraping")
             results_dict = {}
 
-        # Check which stocks succeeded/failed with yfinance
+        # Check which stocks succeeded/failed with yfinance download
         failed_symbols = [symbol for symbol, data in results_dict.items() if data.get("status") == "error"]
 
         # Also check for missing symbols
@@ -594,7 +660,27 @@ class StockMonitorAgent(BaseAgent):
             if symbol not in results_dict:
                 failed_symbols.append(symbol)
 
-        # If any stocks failed with yfinance, try web scraping as fallback
+        # If any stocks failed with yfinance download, try Ticker API
+        if failed_symbols and yf is not None:
+            logger.info(f"Retrying {len(failed_symbols)} failed stocks with yfinance Ticker API: {failed_symbols}")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with yfinance Ticker API")
+            ticker_results = await self._fetch_ticker_info(failed_symbols)
+
+            # Merge successful Ticker API results
+            still_failed = []
+            for symbol in failed_symbols:
+                if ticker_results[symbol].get("status") == "success":
+                    results_dict[symbol] = ticker_results[symbol]
+                    logger.info(f"Successfully fetched {symbol} data from Ticker API")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "yfinance_ticker_api"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+
+        # If still have failures, try web scraping as final fallback
         if failed_symbols:
             logger.info(f"Retrying {len(failed_symbols)} failed stocks with web scraping: {failed_symbols}")
             if debug_metadata:
@@ -736,8 +822,10 @@ class StockMonitorAgent(BaseAgent):
         # Add debug metadata if requested
         if debug_metadata:
             debug_metadata["summary"] = {
-                "yfinance_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
+                "yfinance_download_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
+                "yfinance_ticker_api_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance_ticker_api"),
                 "web_scraping_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "web_scraping"),
+                "demo_data_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "demo_data_fallback"),
                 "failed_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "failed"),
                 "validation_warnings_count": len(debug_metadata["validation_warnings"]),
                 "has_warnings": len(debug_metadata["validation_warnings"]) > 0
