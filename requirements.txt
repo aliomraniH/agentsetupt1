@@ -26,3 +26,6 @@ pytest-asyncio==0.21.1
 
 # Type hints
 typing-extensions==4.8.0
+
+# Stock data
+yfinance==0.2.33

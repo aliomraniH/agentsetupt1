@@ -1,0 +1,138 @@
+name: Stock Monitor Agent
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      category:
+        description: 'Stock category to check'
+        required: false
+        default: 'top_tech'
+        type: choice
+        options:
+          - top_tech
+          - top_sp500
+          - top_diversified
+      custom_symbols:
+        description: 'Custom symbols (comma-separated, e.g., AAPL,GOOGL,TSLA)'
+        required: false
+        type: string
+
+  # Scheduled runs (market hours - weekdays)
+  schedule:
+    # Run at market open (9:30 AM ET = 14:30 UTC)
+    - cron: '30 14 * * 1-5'
+    # Run at market close (4:00 PM ET = 21:00 UTC)
+    - cron: '0 21 * * 1-5'
+
+  # Trigger on agent code changes
+  push:
+    branches:
+      - 'agents/stock-monitor/**'
+    paths:
+      - 'src/agents/stock_monitor.py'
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  fetch-stocks:
+    name: Fetch Stock Data
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Fetch Stock Data
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          echo "📈 Running Stock Monitor Agent"
+          echo "=============================="
+          echo ""
+
+          URL="${BACKEND_URL:-http://localhost:8080}"
+          CATEGORY="${{ github.event.inputs.category || 'top_tech' }}"
+          CUSTOM="${{ github.event.inputs.custom_symbols }}"
+
+          echo "Backend URL: $URL"
+          echo "Category: $CATEGORY"
+
+          if [ -n "$CUSTOM" ]; then
+            echo "Custom Symbols: $CUSTOM"
+            # Convert comma-separated to JSON array
+            SYMBOLS=$(echo "$CUSTOM" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//' | sed 's/^/[/;s/$/]/')
+
+            response=$(curl -s -X POST "$URL/api/v1/agents/stock-monitor/run" \
+              -H "Content-Type: application/json" \
+              -d "{\"symbols\": $SYMBOLS}" 2>/dev/null || echo '{"error": "Request failed"}')
+          else
+            response=$(curl -s -X POST "$URL/api/v1/agents/stock-monitor/run" \
+              -H "Content-Type: application/json" \
+              -d "{\"category\": \"$CATEGORY\"}" 2>/dev/null || echo '{"error": "Request failed"}')
+          fi
+
+          echo ""
+          echo "📊 Stock Data Results"
+          echo "===================="
+          echo ""
+
+          # Check if response is valid JSON
+          if echo "$response" | python -m json.tool > /dev/null 2>&1; then
+            # Pretty print the response
+            echo "$response" | python -m json.tool
+
+            # Extract summary if available
+            echo ""
+            echo "📋 Quick Summary"
+            echo "==============="
+            echo "$response" | python -c "
+import sys, json
+data = json.load(sys.stdin)
+if 'result' in data:
+    result = data['result']
+    if 'summary' in result:
+        s = result['summary']
+        print(f\"Total Stocks: {s.get('total_stocks', 'N/A')}\")
+        print(f\"Gainers: {s.get('gainers', 0)} | Losers: {s.get('losers', 0)}\")
+        print(f\"Avg Change: {s.get('average_change_percent', 0)}%\")
+        print(f\"Total Market Cap: {s.get('total_market_cap', 'N/A')}\")
+    if 'top_gainers' in result and result['top_gainers']:
+        print(f\"\nTop Gainer: {result['top_gainers'][0].get('symbol', 'N/A')} ({result['top_gainers'][0].get('change_percent', 0)}%)\")
+"
+          else
+            echo "Error: Invalid response from server"
+            echo "$response"
+            exit 1
+          fi
+
+  notify-summary:
+    name: Post Summary
+    runs-on: ubuntu-latest
+    needs: fetch-stocks
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "📈 Stock Monitor Agent completed"
+          echo ""
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Trigger: ${{ github.event_name }}"
+
+          # Add notification integrations here:
+          # - Slack webhook
+          # - Discord webhook
+          # - Email notification

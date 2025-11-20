@@ -6,8 +6,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 
-from src.agents import HealthMonitorAgent
+from src.agents import HealthMonitorAgent, StockMonitorAgent
 from src.agents.health_monitor import health_monitor_agent, ServiceType
+from src.agents.stock_monitor import stock_monitor_agent
 
 router = APIRouter()
 
@@ -28,6 +29,12 @@ class AddTargetRequest(BaseModel):
     enabled: bool = True
 
 
+class RunStockCheckRequest(BaseModel):
+    """Request to run stock check"""
+    category: str = "top_tech"
+    symbols: Optional[List[str]] = None
+
+
 # ============== Agent Management ==============
 
 @router.get("/agents")
@@ -37,7 +44,8 @@ async def list_agents():
     Returns information about each agent.
     """
     agents = [
-        health_monitor_agent.get_info()
+        health_monitor_agent.get_info(),
+        stock_monitor_agent.get_info()
     ]
     return {
         "count": len(agents),
@@ -52,6 +60,8 @@ async def get_agent_info(agent_name: str):
     """
     if agent_name == "health-monitor":
         return health_monitor_agent.get_info()
+    elif agent_name == "stock-monitor":
+        return stock_monitor_agent.get_info()
 
     raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
 
@@ -157,3 +167,63 @@ async def remove_monitoring_target(target_id: str):
             raise HTTPException(status_code=404, detail=f"Target '{target_id}' not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============== Stock Monitor Agent ==============
+
+@router.post("/agents/stock-monitor/run")
+async def run_stock_check(request: RunStockCheckRequest = None):
+    """
+    Fetch top stock data.
+
+    Use this endpoint from Claude Chat or other services to get real-time stock information.
+
+    Categories available:
+    - top_tech: Top 10 tech stocks (AAPL, MSFT, GOOGL, etc.)
+    - top_sp500: Top S&P 500 by market cap
+    - top_diversified: Diversified portfolio mix
+
+    Or provide custom symbols list.
+    """
+    if request:
+        result = await stock_monitor_agent.execute(
+            category=request.category,
+            symbols=request.symbols
+        )
+    else:
+        result = await stock_monitor_agent.execute()
+    return result
+
+
+@router.get("/agents/stock-monitor/status")
+async def get_stock_monitor_status():
+    """
+    Get the current status and last result of the stock monitor agent.
+    """
+    info = stock_monitor_agent.get_info()
+    info["last_result"] = stock_monitor_agent.last_result
+    return info
+
+
+@router.get("/agents/stock-monitor/lists")
+async def get_available_stock_lists():
+    """
+    Get available pre-defined stock lists.
+
+    Returns the categories you can use with the run endpoint.
+    """
+    return {
+        "lists": stock_monitor_agent.get_available_lists()
+    }
+
+
+@router.get("/agents/stock-monitor/quick")
+async def quick_stock_check():
+    """
+    Quick check of top tech stocks.
+
+    Convenience endpoint that returns top 10 tech stocks immediately.
+    Ideal for quick queries from Claude Chat.
+    """
+    result = await stock_monitor_agent.execute(category="top_tech")
+    return result
