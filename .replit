@@ -1,5 +1,6 @@
 run = "pip install -r requirements.txt && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
 entrypoint = "src/core/server.py"
+modules = ["python-3.11"]
 
 [nix]
 channel = "stable-23_11"
@@ -9,10 +10,41 @@ PYTHONPATH = "${REPL_HOME}"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 [deployment]
-build = ["sh", "-c", "python -m venv /tmp/venv && /tmp/venv/bin/pip install -r requirements.txt"]
-run = ["sh", "-c", "/tmp/venv/bin/python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080"]
+build = ["pip", "install", "--no-cache-dir", "-r", "requirements.txt"]
+run = ["python", "-m", "uvicorn", "src.core.server:app", "--host", "0.0.0.0", "--port"]
 deploymentTarget = "autoscale"
 
 [[ports]]
 localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 35681
 externalPort = 80
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "FastAPI Backend"
+
+[[workflows.workflow]]
+name = "FastAPI Backend"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "source .venv/bin/activate && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
+waitForPort = 8080
