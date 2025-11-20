@@ -1,5 +1,6 @@
 run = "pip install -r requirements.txt && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
 entrypoint = "src/core/server.py"
+modules = ["python-3.11"]
 
 [nix]
 channel = "stable-23_11"
