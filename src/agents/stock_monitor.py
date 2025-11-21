@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 import asyncio
 import time
+import json
+import re
 from loguru import logger
 
 try:
@@ -16,7 +18,20 @@ except ImportError:
     yf = None
     pd = None
 
+try:
+    import httpx
+    from bs4 import BeautifulSoup
+except ImportError:
+    httpx = None
+    BeautifulSoup = None
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
+
 from src.agents.base import BaseAgent
+from src.core.config import settings
 
 
 class StockCategory(str, Enum):
@@ -102,6 +117,581 @@ class StockMonitorAgent(BaseAgent):
         elapsed = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
         return elapsed < self._cache_ttl
 
+    async def _fetch_with_alpha_vantage(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using Alpha Vantage API (GLOBAL_QUOTE endpoint).
+        This is the most reliable structured data source.
+
+        API Limits: 25 calls/day, 5 calls/minute (free tier)
+
+        Args:
+            symbols: List of stock symbols to fetch
+
+        Returns:
+            Dict mapping symbols to their data
+        """
+        if httpx is None:
+            logger.error("❌ httpx not installed - skipping Alpha Vantage")
+            return {symbol: {"symbol": symbol, "error": "httpx not installed", "status": "error"}
+                    for symbol in symbols}
+
+        if not settings.alpha_vantage_api_key:
+            logger.warning("⚠️  Alpha Vantage API key not configured - skipping")
+            return {symbol: {"symbol": symbol, "error": "Alpha Vantage API not configured", "status": "error"}
+                    for symbol in symbols}
+
+        logger.info(f"✓ Alpha Vantage API key found: {settings.alpha_vantage_api_key[:10]}...")
+        logger.info(f"📊 Fetching {len(symbols)} stocks from Alpha Vantage...")
+
+        results = {}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for symbol in symbols:
+                try:
+                    logger.info(f"  → Fetching {symbol} from Alpha Vantage GLOBAL_QUOTE...")
+
+                    url = "https://www.alphavantage.co/query"
+                    params = {
+                        "function": "GLOBAL_QUOTE",
+                        "symbol": symbol,
+                        "apikey": settings.alpha_vantage_api_key
+                    }
+
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Check for API errors
+                    if "Global Quote" not in data:
+                        error_msg = data.get('Note', data.get('Error Message', data.get('Information', 'Unknown error')))
+                        logger.error(f"  ✗ {symbol}: Alpha Vantage API error - {error_msg}")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": f"API: {error_msg}",
+                            "status": "error"
+                        }
+                        continue
+
+                    quote = data["Global Quote"]
+
+                    # Check if quote is empty (invalid symbol)
+                    if not quote or "01. symbol" not in quote:
+                        logger.error(f"  ✗ {symbol}: No data returned (invalid symbol?)")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": "No data available",
+                            "status": "error"
+                        }
+                        continue
+
+                    # Extract data from Alpha Vantage format
+                    current_price = float(quote.get("05. price", 0))
+                    previous_close = float(quote.get("08. previous close", 0))
+                    change = float(quote.get("09. change", 0))
+                    change_percent_str = quote.get("10. change percent", "0%").replace("%", "")
+                    change_percent = float(change_percent_str)
+                    volume = int(quote.get("06. volume", 0))
+
+                    # Validate data
+                    if current_price <= 0:
+                        logger.error(f"  ✗ {symbol}: Invalid price ${current_price}")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": f"Invalid price: ${current_price}",
+                            "status": "error"
+                        }
+                        continue
+
+                    # Log success
+                    logger.info(f"  ✓ {symbol}: ${current_price} ({change_percent:+.2f}%) from Alpha Vantage")
+
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "name": symbol,  # Alpha Vantage GLOBAL_QUOTE doesn't provide company name
+                        "current_price": round(current_price, 2),
+                        "previous_close": round(previous_close, 2),
+                        "change": round(change, 2),
+                        "change_percent": round(change_percent, 2),
+                        "volume": volume,
+                        "volume_formatted": self._format_volume(volume),
+                        "status": "success"
+                    }
+
+                    # Rate limiting: 5 calls/minute = wait 12 seconds between calls
+                    if len(symbols) > 1:
+                        await asyncio.sleep(0.5)  # Small delay to avoid hitting rate limit
+
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"  ✗ {symbol}: HTTP {e.response.status_code}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"HTTP {e.response.status_code}",
+                        "status": "error"
+                    }
+                except httpx.TimeoutException:
+                    logger.error(f"  ✗ {symbol}: Request timeout")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": "Timeout",
+                        "status": "error"
+                    }
+                except (ValueError, KeyError) as e:
+                    logger.error(f"  ✗ {symbol}: Data parsing error - {e}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"Parse error: {str(e)}",
+                        "status": "error"
+                    }
+                except Exception as e:
+                    logger.error(f"  ✗ {symbol}: {type(e).__name__}: {e}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"{type(e).__name__}: {str(e)}",
+                        "status": "error"
+                    }
+
+        # Summary
+        successful = sum(1 for r in results.values() if r.get("status") == "success")
+        logger.info(f"✓ Alpha Vantage: {successful}/{len(symbols)} stocks fetched successfully")
+
+        return results
+
+    async def _fetch_with_llm_search(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using LLM-powered search (Perplexity) with multi-step validation.
+        Uses a 3-step process to ensure accuracy:
+        1. Verify stock symbol and get company name
+        2. Get current price and previous close
+        3. Get volume and calculate changes
+        """
+        if AsyncOpenAI is None:
+            logger.error("AsyncOpenAI not installed - skipping LLM search")
+            return {symbol: {"symbol": symbol, "error": "AsyncOpenAI not installed", "status": "error"}
+                    for symbol in symbols}
+
+        if not settings.perplexity_api_key:
+            logger.error("Perplexity API key not configured - skipping LLM search")
+            return {symbol: {"symbol": symbol, "error": "Perplexity API not configured", "status": "error"}
+                    for symbol in symbols}
+
+        logger.info(f"✓ Perplexity API key found: {settings.perplexity_api_key[:15]}...")
+        results = {}
+
+        # Initialize Perplexity client
+        try:
+            client = AsyncOpenAI(
+                api_key=settings.perplexity_api_key,
+                base_url="https://api.perplexity.ai"
+            )
+            logger.info("✓ Perplexity client initialized")
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize Perplexity client: {e}")
+            return {symbol: {"symbol": symbol, "error": f"Client init: {str(e)}", "status": "error"}
+                    for symbol in symbols}
+
+        for symbol in symbols:
+            try:
+                logger.info(f"→ Fetching {symbol} with multi-step validation...")
+
+                # STEP 1: Verify stock exists and get company name
+                logger.info(f"  Step 1/3: Verifying {symbol} exists...")
+                step1_prompt = f"""Search for stock ticker symbol {symbol}. What is the full company name?
+Reply with ONLY the company name, no other text."""
+
+                step1_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data assistant. Answer precisely and concisely."},
+                        {"role": "user", "content": step1_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=100
+                )
+                company_name = step1_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 1: {symbol} = {company_name}")
+
+                # Validate we got a reasonable company name
+                if len(company_name) < 2 or len(company_name) > 100:
+                    raise ValueError(f"Invalid company name: {company_name}")
+
+                # STEP 2: Get current price and previous close
+                logger.info(f"  Step 2/3: Getting prices for {symbol}...")
+                step2_prompt = f"""What is the current stock price and previous day's closing price for {symbol} ({company_name})?
+Reply with ONLY two numbers separated by a comma: current_price,previous_close
+Example: 150.25,148.50"""
+
+                step2_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data assistant. Return only the requested numbers, nothing else."},
+                        {"role": "user", "content": step2_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+                prices_text = step2_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 2: Prices = {prices_text}")
+
+                # Parse and validate prices
+                price_parts = prices_text.replace("$", "").replace(" ", "").split(",")
+                if len(price_parts) != 2:
+                    raise ValueError(f"Expected 2 prices, got: {prices_text}")
+
+                current_price = float(price_parts[0])
+                previous_close = float(price_parts[1])
+
+                # Sanity check prices
+                if current_price <= 0 or current_price > 100000:
+                    raise ValueError(f"Invalid current price: ${current_price}")
+                if previous_close <= 0 or previous_close > 100000:
+                    raise ValueError(f"Invalid previous close: ${previous_close}")
+
+                # STEP 3: Get volume
+                logger.info(f"  Step 3/3: Getting volume for {symbol}...")
+                step3_prompt = f"""What is the current trading volume for {symbol} ({company_name}) today?
+Reply with ONLY the volume number, no other text.
+Example: 25000000"""
+
+                step3_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data assistant. Return only the requested number."},
+                        {"role": "user", "content": step3_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+                volume_text = step3_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 3: Volume = {volume_text}")
+
+                # Parse volume - handle various formats (25M, 25000000, 25,000,000)
+                volume_text = volume_text.replace(",", "").replace(" ", "").upper()
+                try:
+                    if "M" in volume_text:
+                        volume = int(float(volume_text.replace("M", "")) * 1_000_000)
+                    elif "B" in volume_text:
+                        volume = int(float(volume_text.replace("B", "")) * 1_000_000_000)
+                    elif "K" in volume_text:
+                        volume = int(float(volume_text.replace("K", "")) * 1_000)
+                    else:
+                        volume = int(float(volume_text))
+                except (ValueError, AttributeError):
+                    logger.warning(f"  Could not parse volume: {volume_text}, using None")
+                    volume = None
+
+                # Calculate changes
+                change = current_price - previous_close
+                change_percent = (change / previous_close) * 100
+
+                # Final validation: Check if price change seems reasonable
+                if abs(change_percent) > 50:
+                    logger.warning(f"  ⚠ Large price change detected: {change_percent:.2f}%")
+
+                results[symbol] = {
+                    "symbol": symbol,
+                    "name": company_name,
+                    "current_price": round(current_price, 2),
+                    "previous_close": round(previous_close, 2),
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume) if volume else "N/A",
+                    "status": "success"
+                }
+                logger.info(f"✓ {symbol}: ${current_price} ({change_percent:+.2f}%) via LLM")
+
+            except ValueError as e:
+                logger.error(f"✗ {symbol}: Validation error - {e}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"Validation: {str(e)}",
+                    "status": "error"
+                }
+            except Exception as e:
+                logger.error(f"✗ {symbol}: {type(e).__name__}: {e}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"{type(e).__name__}: {str(e)}",
+                    "status": "error"
+                }
+
+        return results
+
+    async def _scrape_yahoo_finance(self, symbol: str) -> Dict[str, Any]:
+        """
+        Scrape stock data from Yahoo Finance website.
+        More reliable than yfinance API.
+        """
+        if httpx is None or BeautifulSoup is None:
+            return {"symbol": symbol, "error": "httpx or BeautifulSoup not installed", "status": "error"}
+
+        try:
+            url = f"https://finance.yahoo.com/quote/{symbol}"
+            
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code != 200:
+                    return {"symbol": symbol, "error": f"HTTP {response.status_code}", "status": "error"}
+
+                soup = BeautifulSoup(response.text, 'lxml')
+
+                # Method 1: Try to extract from embedded JSON (most reliable)
+                current_price = None
+                change = None
+                change_percent = None
+                previous_close = None
+                volume = None
+
+                # Look for script tags containing JSON data
+                scripts = soup.find_all('script')
+                for script in scripts:
+                    if script.string and 'root.App.main' in script.string:
+                        try:
+                            # Extract JSON from the script
+                            # Find the JSON object
+                            match = re.search(r'root\.App\.main\s*=\s*({.*?});', script.string, re.DOTALL)
+                            if match:
+                                data = json.loads(match.group(1))
+
+                                # Navigate to quote data
+                                if 'context' in data and 'dispatcher' in data['context']:
+                                    stores = data['context']['dispatcher']['stores']
+                                    if 'QuoteSummaryStore' in stores:
+                                        quote_data = stores['QuoteSummaryStore']
+
+                                        # Extract price data
+                                        if 'price' in quote_data:
+                                            price_info = quote_data['price']
+                                            current_price = price_info.get('regularMarketPrice', {}).get('raw')
+                                            change = price_info.get('regularMarketChange', {}).get('raw')
+                                            change_percent = price_info.get('regularMarketChangePercent', {}).get('raw')
+                                            previous_close = price_info.get('regularMarketPreviousClose', {}).get('raw')
+                                            volume = price_info.get('regularMarketVolume', {}).get('raw')
+
+                                        break
+                        except Exception as e:
+                            logger.debug(f"Failed to parse JSON for {symbol}: {e}")
+                            continue
+
+                # Method 2: Extract current price from HTML - try multiple selectors
+                if not current_price:
+                    # Try fin-streamer with data-symbol
+                    price_element = soup.find('fin-streamer', {'data-symbol': symbol, 'data-field': 'regularMarketPrice'})
+                    if price_element:
+                        try:
+                            current_price = float(price_element.text.replace(',', ''))
+                        except:
+                            pass
+
+                    # Try fin-streamer without data-symbol
+                    if not current_price:
+                        price_element = soup.find('fin-streamer', {'data-field': 'regularMarketPrice'})
+                        if price_element:
+                            try:
+                                current_price = float(price_element.text.replace(',', ''))
+                            except:
+                                pass
+
+                    # Look for price in specific div/span patterns
+                    if not current_price:
+                        for tag in soup.find_all(['span', 'div'], class_=lambda x: x and 'price' in x.lower() if x else False):
+                            try:
+                                text = tag.text.strip().replace(',', '').replace('$', '')
+                                if text and text[0].isdigit():
+                                    current_price = float(text)
+                                    break
+                            except:
+                                continue
+
+                # Extract change from HTML if not from JSON
+                if change is None:
+                    change_element = soup.find('fin-streamer', {'data-field': 'regularMarketChange'})
+                    if change_element:
+                        try:
+                            change = float(change_element.text.replace(',', ''))
+                        except:
+                            pass
+
+                # Extract change percent from HTML if not from JSON
+                if change_percent is None:
+                    change_pct_element = soup.find('fin-streamer', {'data-field': 'regularMarketChangePercent'})
+                    if change_pct_element:
+                        try:
+                            change_pct_text = change_pct_element.text.replace('%', '').replace('(', '').replace(')', '')
+                            change_percent = float(change_pct_text)
+                        except:
+                            pass
+
+                # Extract previous close from HTML if not from JSON
+                if previous_close is None:
+                    prev_close_element = soup.find('td', {'data-test': 'PREV_CLOSE-value'})
+                    if prev_close_element:
+                        try:
+                            previous_close = float(prev_close_element.text.replace(',', ''))
+                        except:
+                            pass
+
+                # Extract volume from HTML if not from JSON
+                if volume is None:
+                    volume_element = soup.find('fin-streamer', {'data-field': 'regularMarketVolume'})
+                    if volume_element:
+                        try:
+                            volume_text = volume_element.text.replace(',', '')
+                            volume = int(volume_text) if volume_text else None
+                        except:
+                            pass
+
+                # Calculate missing values
+                if current_price and previous_close and change is None:
+                    change = current_price - previous_close
+                if current_price and previous_close and change_percent is None:
+                    change_percent = (change / previous_close) * 100
+                if previous_close is None and current_price and change:
+                    previous_close = current_price - change
+                elif change_percent and current_price and not previous_close:
+                    # Calculate previous close from percent change
+                    previous_close = current_price / (1 + change_percent/100)
+
+                # Normalize prices - detect if prices are in wrong units
+                # Most major stocks trade between $10 and $1000. Outside this range needs validation.
+                if current_price:
+                    # If price > 2000, likely in cents (need to divide by 100)
+                    if current_price > 2000:
+                        if change_percent and abs(change_percent) < 20:  # Reasonable daily change
+                            current_price = current_price / 100
+                            if previous_close:
+                                previous_close = previous_close / 100
+                            if change:
+                                change = change / 100
+
+                    # If price is very low (< $5) for major tech stocks, might be missing a multiplier
+                    # But be careful - some stocks legitimately trade below $5
+                    # For now, we'll just log this for debugging
+                    if current_price < 10:
+                        logger.debug(f"{symbol} price seems low: ${current_price}")
+
+                # Recalculate if we normalized
+                if current_price and previous_close:
+                    change = current_price - previous_close
+                    change_percent = (change / previous_close) * 100
+
+                # Validation: Check if the data seems reasonable
+                if current_price:
+                    # If change_percent is extremely high but absolute change is tiny, data is suspect
+                    if change_percent and abs(change_percent) > 50 and change and abs(change) < 1:
+                        logger.warning(f"{symbol} suspicious data: {change_percent}% change but only ${change}")
+                        return {"symbol": symbol, "error": "Suspicious price data detected", "status": "error"}
+
+                return {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "current_price": round(current_price, 2) if current_price else None,
+                    "previous_close": round(previous_close, 2) if previous_close else None,
+                    "change": round(change, 2) if change else 0,
+                    "change_percent": round(change_percent, 2) if change_percent else 0,
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume),
+                    "status": "success"
+                }
+
+        except Exception as e:
+            logger.error(f"Error scraping {symbol}: {e}")
+            return {"symbol": symbol, "error": str(e), "status": "error"}
+
+    async def _fetch_stocks_web_scraping(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using web scraping.
+        Fallback when yfinance fails.
+        """
+        logger.info(f"Fetching {len(symbols)} stocks via web scraping")
+        
+        # Scrape each stock with delay to avoid rate limiting
+        results = {}
+        for i, symbol in enumerate(symbols):
+            result = await self._scrape_yahoo_finance(symbol)
+            results[symbol] = result
+            
+            # Add small delay between requests to be polite
+            if i < len(symbols) - 1:
+                await asyncio.sleep(0.5)
+        
+        return results
+
+
+
+
+    async def _fetch_ticker_info(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using yfinance Ticker().history() method.
+        This works even when markets are closed by getting historical data.
+        """
+        if yf is None:
+            return {symbol: {"symbol": symbol, "error": "yfinance not installed", "status": "error"}
+                    for symbol in symbols}
+
+        results = {}
+        loop = asyncio.get_event_loop()
+
+        for symbol in symbols:
+            try:
+                def get_ticker_history():
+                    ticker = yf.Ticker(symbol)
+                    # Get last 2 days of history to ensure we have recent data
+                    hist = ticker.history(period="2d")
+                    info = ticker.info
+                    return hist, info
+
+                hist, info = await loop.run_in_executor(None, get_ticker_history)
+
+                if hist.empty or len(hist) == 0:
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": "No historical data available",
+                        "status": "error"
+                    }
+                    continue
+
+                # Get the most recent day's data
+                latest = hist.iloc[-1]
+                current_price = float(latest['Close'])
+
+                # Get previous close
+                if len(hist) >= 2:
+                    previous_close = float(hist.iloc[-2]['Close'])
+                else:
+                    previous_close = float(latest['Open'])
+
+                change = current_price - previous_close
+                change_percent = (change / previous_close) * 100 if previous_close else 0
+                volume = int(latest['Volume']) if 'Volume' in latest else None
+
+                results[symbol] = {
+                    "symbol": symbol,
+                    "name": info.get('longName') or info.get('shortName') or symbol,
+                    "current_price": round(current_price, 2),
+                    "previous_close": round(previous_close, 2),
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume) if volume else "N/A",
+                    "status": "success"
+                }
+                logger.info(f"Successfully fetched {symbol} via Ticker history")
+
+            except Exception as e:
+                logger.error(f"Ticker history error for {symbol}: {e}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"Ticker history error: {str(e)}",
+                    "status": "error"
+                }
+
+        return results
+
     async def _fetch_batch_data(self, symbols: List[str]) -> Dict[str, Any]:
         """
         Fetch data for multiple stocks using batch download.
@@ -119,22 +709,25 @@ class StockMonitorAgent(BaseAgent):
 
             def download_data():
                 # Use download with specific parameters to avoid rate limits
+                # Use longer period to ensure we get data even when markets are closed
                 data = yf.download(
                     symbols_str,
-                    period="5d",
+                    period="2d",  # Get last 2 days to ensure we have recent data
                     interval="1d",
                     group_by="ticker",
                     auto_adjust=True,
                     progress=False,
-                    threads=False
+                    threads=False,
+                    prepost=True  # Include pre/post market data
                 )
                 return data
 
             data = await loop.run_in_executor(None, download_data)
 
             if data is None or data.empty:
-                logger.error("No data returned from yfinance")
-                return {symbol: {"symbol": symbol, "error": "No data returned", "status": "error"}
+                logger.error("yfinance returned empty data - all stocks failed")
+                # Return errors instead of demo data so web scraping can be tried
+                return {symbol: {"symbol": symbol, "error": "yfinance returned empty data", "status": "error"}
                         for symbol in symbols}
 
             # Process each symbol
@@ -204,12 +797,9 @@ class StockMonitorAgent(BaseAgent):
             error_msg = str(e)
             logger.error(f"Batch download error: {error_msg}")
 
-            # If rate limited, return demo data
-            if "429" in error_msg or "Too Many Requests" in error_msg:
-                logger.info("Rate limited - returning demo data")
-                return self._get_demo_data(symbols)
-
-            return {symbol: {"symbol": symbol, "error": error_msg, "status": "error"}
+            # Return errors instead of demo data - let web scraping be tried as fallback
+            logger.warning(f"yfinance failed with exception: {error_msg}")
+            return {symbol: {"symbol": symbol, "error": f"yfinance error: {error_msg}", "status": "error"}
                     for symbol in symbols}
 
     def _get_demo_data(self, symbols: List[str]) -> Dict[str, Any]:
@@ -292,6 +882,8 @@ class StockMonitorAgent(BaseAgent):
         category: str = "top_tech",
         symbols: Optional[List[str]] = None,
         format_for_claude: bool = True,
+        skip_cache: bool = False,
+        debug: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -301,10 +893,20 @@ class StockMonitorAgent(BaseAgent):
             category: Pre-defined category (top_tech, top_sp500, top_diversified)
             symbols: Custom list of stock symbols (overrides category)
             format_for_claude: Include Claude-friendly text summary
+            skip_cache: If True, bypass cache and fetch fresh data
+            debug: If True, include debug metadata (data sources, validation results)
 
         Returns:
             Dict containing stock data for all requested symbols
         """
+        # Initialize debug metadata
+        debug_metadata = {
+            "cache_used": False,
+            "data_sources": {},
+            "validation_warnings": [],
+            "fetch_order": []
+        } if debug else None
+
         # Determine which symbols to fetch
         if symbols:
             stock_symbols = [s.upper() for s in symbols[:20]]
@@ -319,20 +921,231 @@ class StockMonitorAgent(BaseAgent):
         # Create cache key
         cache_key = ",".join(sorted(stock_symbols))
 
-        # Check cache
-        if self._is_cache_valid(cache_key):
+        # Check cache (unless skip_cache is True)
+        if not skip_cache and self._is_cache_valid(cache_key):
             logger.info(f"[{self.name}] Returning cached data for {list_name}")
-            return self._cache[cache_key]
+            cached_result = self._cache[cache_key]
+            if debug_metadata:
+                cached_result["_debug"] = {
+                    "cache_used": True,
+                    "cache_age_seconds": (datetime.now(timezone.utc) - self._cache_time).total_seconds(),
+                    "note": "This is cached data. Use ?skip_cache=true to fetch fresh data."
+                }
+            return cached_result
 
-        logger.info(f"[{self.name}] Fetching {len(stock_symbols)} stocks: {list_name}")
+        if skip_cache:
+            logger.info(f"[{self.name}] Cache bypassed - fetching fresh data for {list_name}")
+        else:
+            logger.info(f"[{self.name}] Cache miss - fetching {len(stock_symbols)} stocks: {list_name}")
 
-        # Fetch all stocks using batch download
-        results_dict = await self._fetch_batch_data(stock_symbols)
+        if debug_metadata:
+            debug_metadata["fetch_order"].append("Starting fresh data fetch")
+
+        logger.info("="*80)
+        logger.info(f"🚀 STOCK MONITOR - Fetching {len(stock_symbols)} stocks: {stock_symbols}")
+        logger.info("="*80)
+
+        # === TIER 1: Alpha Vantage (Primary - Most Reliable Structured Data) ===
+        results_dict = {}
+        if settings.alpha_vantage_api_key:
+            logger.info("📊 TIER 1: Attempting Alpha Vantage API...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 1: Attempting Alpha Vantage for all symbols")
+            results_dict = await self._fetch_with_alpha_vantage(stock_symbols)
+
+            # Track which stocks succeeded with Alpha Vantage
+            if debug_metadata:
+                for symbol, data in results_dict.items():
+                    if data.get("status") == "success":
+                        debug_metadata["data_sources"][symbol] = "alpha_vantage"
+        else:
+            logger.warning("⚠️  Alpha Vantage API key not configured - skipping Tier 1")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 1: Alpha Vantage skipped (no API key)")
+
+        # Check which stocks succeeded/failed
+        failed_symbols = [symbol for symbol, data in results_dict.items() if data.get("status") == "error"]
+
+        # Also check for missing symbols
+        for symbol in stock_symbols:
+            if symbol not in results_dict:
+                failed_symbols.append(symbol)
+
+        logger.info(f"📊 Tier 1 Results: {len(stock_symbols) - len(failed_symbols)}/{len(stock_symbols)} successful")
+        if failed_symbols:
+            logger.info(f"⚠️  {len(failed_symbols)} stocks need fallback: {failed_symbols}")
+
+        # === TIER 2: yfinance (Fallback for Alpha Vantage failures) ===
+        if failed_symbols and yf is not None:
+            logger.info(f"📈 TIER 2: Retrying {len(failed_symbols)} stocks with yfinance...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 2: Attempting yfinance for {len(failed_symbols)} symbols")
+            yf_results = await self._fetch_batch_data(failed_symbols)
+
+            # Merge successful yfinance results
+            still_failed = []
+            for symbol in failed_symbols:
+                if yf_results.get(symbol, {}).get("status") == "success":
+                    results_dict[symbol] = yf_results[symbol]
+                    logger.info(f"✓ {symbol}: Fetched from yfinance")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "yfinance"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+            logger.info(f"📈 Tier 2 Results: {len(failed_symbols)} still need fallback")
+        elif failed_symbols:
+            logger.warning("⚠️  yfinance not available for Tier 2 fallback")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 2: yfinance not available")
+
+        # === TIER 3: yfinance Ticker API (For individual stock details) ===
+        if failed_symbols and yf is not None:
+            logger.info(f"📊 TIER 3: Retrying {len(failed_symbols)} stocks with yfinance Ticker API...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 3: Attempting yfinance Ticker API for {len(failed_symbols)} symbols")
+            ticker_results = await self._fetch_ticker_info(failed_symbols)
+
+            # Merge successful Ticker API results
+            still_failed = []
+            for symbol in failed_symbols:
+                if ticker_results[symbol].get("status") == "success":
+                    results_dict[symbol] = ticker_results[symbol]
+                    logger.info(f"✓ {symbol}: Fetched from yfinance Ticker API")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "yfinance_ticker_api"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+            logger.info(f"📊 Tier 3 Results: {len(failed_symbols)} still need fallback")
+
+        # === TIER 4: Perplexity LLM Search (Intelligent fallback with validation) ===
+        if failed_symbols and settings.perplexity_api_key:
+            logger.info(f"🤖 TIER 4: Retrying {len(failed_symbols)} stocks with Perplexity LLM...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 4: Attempting Perplexity LLM for {len(failed_symbols)} symbols")
+            llm_results = await self._fetch_with_llm_search(failed_symbols)
+
+            # Merge successful LLM results
+            still_failed = []
+            for symbol in failed_symbols:
+                if llm_results[symbol].get("status") == "success":
+                    results_dict[symbol] = llm_results[symbol]
+                    logger.info(f"✓ {symbol}: Fetched from Perplexity LLM")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "llm_search"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+            logger.info(f"🤖 Tier 4 Results: {len(failed_symbols)} still need fallback")
+        elif failed_symbols and not settings.perplexity_api_key:
+            logger.warning("⚠️  Perplexity API key not configured - skipping Tier 4")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 4: Perplexity skipped (no API key)")
+
+        # === TIER 5: Web Scraping (Last resort - less reliable) ===
+        if failed_symbols:
+            logger.info(f"🌐 TIER 5: Last resort - web scraping {len(failed_symbols)} stocks...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 5: Web scraping for {len(failed_symbols)} symbols: {failed_symbols}")
+            scraping_results = await self._fetch_stocks_web_scraping(failed_symbols)
+
+            # Merge successful scraping results back
+            for symbol in failed_symbols:
+                if scraping_results[symbol].get("status") == "success":
+                    results_dict[symbol] = scraping_results[symbol]
+                    logger.info(f"✓ {symbol}: Fetched from web scraping")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "web_scraping"
+                elif symbol not in results_dict:
+                    # Keep the error result
+                    results_dict[symbol] = scraping_results[symbol]
+                    logger.warning(f"✗ {symbol}: All tiers failed")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "failed"
+
+        logger.info("="*80)
+        logger.info(f"✅ FETCH COMPLETE: {len([r for r in results_dict.values() if r.get('status') == 'success'])}/{len(stock_symbols)} successful")
+        logger.info("="*80)
+
+        # Final validation: Detect suspicious data patterns
+        successful_data = {symbol: data for symbol, data in results_dict.items()
+                          if data.get("status") == "success" and data.get("current_price") is not None}
+
+        # Sanity check: Major tech stocks should be within reasonable price ranges
+        # This catches obviously wrong data (100x too high/low)
+        expected_ranges = {
+            "AAPL": (100, 300),    # Apple typically $150-250
+            "MSFT": (200, 500),    # Microsoft typically $300-450
+            "GOOGL": (80, 200),    # Alphabet typically $120-180
+            "AMZN": (100, 250),    # Amazon typically $130-200
+            "META": (200, 700),    # Meta typically $300-600
+            "TSLA": (150, 500),    # Tesla typically $200-400
+            "NVDA": (100, 300),    # Nvidia typically $150-250
+            "AMD": (50, 250),      # AMD typically $100-200
+            "INTC": (15, 80),      # Intel typically $20-50
+            "CRM": (150, 350)      # Salesforce typically $200-300
+        }
+
+        for symbol, data in successful_data.items():
+            price = data.get("current_price")
+            if symbol in expected_ranges and price:
+                min_price, max_price = expected_ranges[symbol]
+                if price < min_price * 0.5 or price > max_price * 2:
+                    warning_msg = f"{symbol}: Price ${price} outside typical range ${min_price}-${max_price}"
+                    logger.error(f"Price out of range - {warning_msg}")
+                    # Mark as suspicious but keep the data with a warning
+                    data["warning"] = f"Price ${price} outside typical range ${min_price}-${max_price}"
+                    if debug_metadata:
+                        debug_metadata["validation_warnings"].append(warning_msg)
+
+        # Cross-check: detect if multiple stocks have identical prices (data quality issue)
+        if len(successful_data) > 1:
+            prices = [data["current_price"] for data in successful_data.values()]
+            if len(prices) != len(set(prices)):
+                price_counts = {}
+                for symbol, data in successful_data.items():
+                    price = data["current_price"]
+                    if price not in price_counts:
+                        price_counts[price] = []
+                    price_counts[price].append(symbol)
+
+                # Warn about duplicates
+                for price, symbols_with_price in price_counts.items():
+                    if len(symbols_with_price) > 1:
+                        warning_msg = f"DUPLICATE PRICES - ${price}: {symbols_with_price}"
+                        logger.error(warning_msg)
+                        # Add warning to each affected stock
+                        for sym in symbols_with_price:
+                            if sym in successful_data:
+                                successful_data[sym]["warning"] = f"Duplicate price detected with {symbols_with_price}"
+                        if debug_metadata:
+                            debug_metadata["validation_warnings"].append(warning_msg)
+
+        # Convert to list maintaining original order
         results = [results_dict[symbol] for symbol in stock_symbols]
 
-        # Separate successful and failed
+        # Final success/failure counts
         successful = [r for r in results if r.get("status") == "success"]
         failed = [r for r in results if r.get("status") == "error"]
+
+        logger.info(f"Final results: {len(successful)} successful, {len(failed)} failed")
+
+        # Last resort: If EVERYTHING failed, use demo data
+        if len(successful) == 0:
+            logger.error("All data sources failed - using demo data as last resort")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("All sources failed - using demo data fallback")
+                # Mark all as demo data source
+                for symbol in stock_symbols:
+                    debug_metadata["data_sources"][symbol] = "demo_data_fallback"
+            demo_results = self._get_demo_data(stock_symbols)
+            results = [demo_results[symbol] for symbol in stock_symbols]
+            successful = [r for r in results if r.get("status") == "success"]
+            failed = []
 
         # Sort by change percentage
         sorted_by_change = sorted(
@@ -377,8 +1190,42 @@ class StockMonitorAgent(BaseAgent):
             claude_format = self._format_for_claude(result)
             result["claude_summary"] = claude_format["text_summary"]
 
-        # Cache the result
-        self._cache[cache_key] = result
+        # Add debug metadata if requested
+        if debug_metadata:
+            debug_metadata["summary"] = {
+                "alpha_vantage_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "alpha_vantage"),
+                "yfinance_download_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
+                "yfinance_ticker_api_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance_ticker_api"),
+                "llm_search_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "llm_search"),
+                "web_scraping_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "web_scraping"),
+                "demo_data_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "demo_data_fallback"),
+                "failed_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "failed"),
+                "validation_warnings_count": len(debug_metadata["validation_warnings"]),
+                "has_warnings": len(debug_metadata["validation_warnings"]) > 0
+            }
+            result["_debug"] = debug_metadata
+
+            # Print comprehensive debug summary to console
+            logger.info("\n" + "="*80)
+            logger.info("📊 DEBUG SUMMARY")
+            logger.info("="*80)
+            logger.info(f"Data Sources Used:")
+            logger.info(f"  • Alpha Vantage:     {debug_metadata['summary']['alpha_vantage_count']} stocks")
+            logger.info(f"  • yfinance (batch):  {debug_metadata['summary']['yfinance_download_count']} stocks")
+            logger.info(f"  • yfinance (ticker): {debug_metadata['summary']['yfinance_ticker_api_count']} stocks")
+            logger.info(f"  • Perplexity LLM:    {debug_metadata['summary']['llm_search_count']} stocks")
+            logger.info(f"  • Web Scraping:      {debug_metadata['summary']['web_scraping_count']} stocks")
+            logger.info(f"  • Failed:            {debug_metadata['summary']['failed_count']} stocks")
+            logger.info(f"\nValidation:")
+            logger.info(f"  • Warnings:          {debug_metadata['summary']['validation_warnings_count']}")
+            if debug_metadata["validation_warnings"]:
+                for warning in debug_metadata["validation_warnings"]:
+                    logger.warning(f"    ⚠️  {warning}")
+            logger.info("="*80 + "\n")
+
+        # Cache the result (but don't cache debug metadata)
+        result_to_cache = {k: v for k, v in result.items() if k != "_debug"}
+        self._cache[cache_key] = result_to_cache
         self._cache_time = datetime.now(timezone.utc)
 
         return result
