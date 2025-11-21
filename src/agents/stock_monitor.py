@@ -321,8 +321,8 @@ class StockMonitorAgent(BaseAgent):
 
     async def _fetch_ticker_info(self, symbols: List[str]) -> Dict[str, Any]:
         """
-        Fetch stock data using yfinance Ticker().info API.
-        This is an alternative method when download() fails.
+        Fetch stock data using yfinance Ticker().history() method.
+        This works even when markets are closed by getting historical data.
         """
         if yf is None:
             return {symbol: {"symbol": symbol, "error": "yfinance not installed", "status": "error"}
@@ -333,53 +333,55 @@ class StockMonitorAgent(BaseAgent):
 
         for symbol in symbols:
             try:
-                def get_ticker_info():
+                def get_ticker_history():
                     ticker = yf.Ticker(symbol)
-                    return ticker.info
+                    # Get last 2 days of history to ensure we have recent data
+                    hist = ticker.history(period="2d")
+                    info = ticker.info
+                    return hist, info
 
-                info = await loop.run_in_executor(None, get_ticker_info)
+                hist, info = await loop.run_in_executor(None, get_ticker_history)
 
-                if not info or 'currentPrice' not in info:
+                if hist.empty or len(hist) == 0:
                     results[symbol] = {
                         "symbol": symbol,
-                        "error": "No price data in ticker info",
+                        "error": "No historical data available",
                         "status": "error"
                     }
                     continue
 
-                current_price = info.get('currentPrice') or info.get('regularMarketPrice')
-                previous_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                # Get the most recent day's data
+                latest = hist.iloc[-1]
+                current_price = float(latest['Close'])
 
-                if not current_price or not previous_close:
-                    results[symbol] = {
-                        "symbol": symbol,
-                        "error": "Missing price data",
-                        "status": "error"
-                    }
-                    continue
+                # Get previous close
+                if len(hist) >= 2:
+                    previous_close = float(hist.iloc[-2]['Close'])
+                else:
+                    previous_close = float(latest['Open'])
 
                 change = current_price - previous_close
                 change_percent = (change / previous_close) * 100 if previous_close else 0
-                volume = info.get('volume') or info.get('regularMarketVolume')
+                volume = int(latest['Volume']) if 'Volume' in latest else None
 
                 results[symbol] = {
                     "symbol": symbol,
-                    "name": info.get('longName') or symbol,
-                    "current_price": round(float(current_price), 2),
-                    "previous_close": round(float(previous_close), 2),
+                    "name": info.get('longName') or info.get('shortName') or symbol,
+                    "current_price": round(current_price, 2),
+                    "previous_close": round(previous_close, 2),
                     "change": round(change, 2),
                     "change_percent": round(change_percent, 2),
-                    "volume": int(volume) if volume else None,
-                    "volume_formatted": self._format_volume(int(volume)) if volume else "N/A",
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume) if volume else "N/A",
                     "status": "success"
                 }
-                logger.info(f"Successfully fetched {symbol} via Ticker API")
+                logger.info(f"Successfully fetched {symbol} via Ticker history")
 
             except Exception as e:
-                logger.error(f"Ticker API error for {symbol}: {e}")
+                logger.error(f"Ticker history error for {symbol}: {e}")
                 results[symbol] = {
                     "symbol": symbol,
-                    "error": f"Ticker API error: {str(e)}",
+                    "error": f"Ticker history error: {str(e)}",
                     "status": "error"
                 }
 
