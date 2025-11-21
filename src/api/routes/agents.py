@@ -65,10 +65,385 @@ async def list_agents():
     }
 
 
+# ============== LLM API Test Endpoints (Must be before {agent_name} route) ==============
+
+@router.get("/agents/llm-test")
+async def test_llm_api():
+    """
+    Test Perplexity LLM API with simple questions that have known answers.
+
+    This endpoint verifies that:
+    1. The API key is configured correctly
+    2. The API is responding to requests
+    3. The responses are accurate
+
+    Tests include:
+    - Capital cities of countries
+    - Colors of common objects
+    - Basic factual questions
+    """
+    logger.info("="*80)
+    logger.info("🧪 LLM API TEST - Starting Perplexity API verification")
+    logger.info("="*80)
+
+    # Check if API key is configured
+    if not settings.perplexity_api_key:
+        logger.error("❌ Perplexity API key not configured")
+        return {
+            "status": "error",
+            "error": "PERPLEXITY_API_KEY not configured in Replit Secrets",
+            "message": "Please add your Perplexity API key to Replit Secrets"
+        }
+
+    logger.info(f"✓ API key found: {settings.perplexity_api_key[:15]}...")
+
+    # Import OpenAI client
+    try:
+        from openai import OpenAI
+        logger.info("✓ OpenAI library imported successfully")
+    except ImportError:
+        logger.error("❌ OpenAI library not installed")
+        return {
+            "status": "error",
+            "error": "OpenAI library not installed",
+            "message": "Run: pip install openai"
+        }
+
+    # Test questions with known answers
+    test_questions = [
+        {
+            "id": "capitals_1",
+            "question": "What is the capital of France?",
+            "expected_answer": "Paris",
+            "category": "geography"
+        },
+        {
+            "id": "capitals_2",
+            "question": "What is the capital of Japan?",
+            "expected_answer": "Tokyo",
+            "category": "geography"
+        },
+        {
+            "id": "colors_1",
+            "question": "What color is the sky on a clear day?",
+            "expected_answer": "blue",
+            "category": "colors"
+        },
+        {
+            "id": "colors_2",
+            "question": "What color are bananas when they are ripe?",
+            "expected_answer": "yellow",
+            "category": "colors"
+        },
+        {
+            "id": "facts_1",
+            "question": "How many continents are there on Earth?",
+            "expected_answer": "7",
+            "category": "facts"
+        }
+    ]
+
+    results = []
+    passed = 0
+    failed = 0
+
+    logger.info(f"\n📝 Running {len(test_questions)} test questions...")
+    logger.info("-"*80)
+
+    try:
+        # Initialize Perplexity client
+        client = OpenAI(
+            api_key=settings.perplexity_api_key,
+            base_url="https://api.perplexity.ai"
+        )
+        logger.info("✓ Perplexity client initialized")
+
+        # Run each test question
+        for i, test in enumerate(test_questions, 1):
+            logger.info(f"\n🔍 Test {i}/{len(test_questions)}: {test['question']}")
+            logger.info(f"   Expected: {test['expected_answer']}")
+
+            try:
+                # Make API call
+                response = client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a helpful assistant. Answer questions concisely with just the answer, no explanations."
+                        },
+                        {
+                            "role": "user",
+                            "content": test['question']
+                        }
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+
+                answer = response.choices[0].message.content.strip()
+                logger.info(f"   Response: {answer}")
+
+                # Check if answer is correct (case-insensitive contains)
+                expected_lower = test['expected_answer'].lower()
+                answer_lower = answer.lower()
+
+                is_correct = expected_lower in answer_lower
+
+                if is_correct:
+                    logger.success(f"   ✅ PASSED - Answer contains '{test['expected_answer']}'")
+                    passed += 1
+                    test_result = "passed"
+                else:
+                    logger.error(f"   ❌ FAILED - Expected '{test['expected_answer']}' but got '{answer}'")
+                    failed += 1
+                    test_result = "failed"
+
+                results.append({
+                    "test_id": test['id'],
+                    "question": test['question'],
+                    "expected": test['expected_answer'],
+                    "actual": answer,
+                    "result": test_result,
+                    "category": test['category']
+                })
+
+            except Exception as e:
+                logger.error(f"   ❌ ERROR: {type(e).__name__}: {e}")
+                failed += 1
+                results.append({
+                    "test_id": test['id'],
+                    "question": test['question'],
+                    "expected": test['expected_answer'],
+                    "actual": None,
+                    "error": str(e),
+                    "result": "error",
+                    "category": test['category']
+                })
+
+        # Summary
+        logger.info("\n" + "="*80)
+        logger.info("📊 TEST SUMMARY")
+        logger.info("="*80)
+        logger.info(f"Total Tests:  {len(test_questions)}")
+        logger.info(f"✅ Passed:     {passed}")
+        logger.info(f"❌ Failed:     {failed}")
+        logger.info(f"Success Rate: {(passed/len(test_questions)*100):.1f}%")
+        logger.info("="*80)
+
+        overall_status = "success" if failed == 0 else "partial" if passed > 0 else "error"
+
+        return {
+            "status": overall_status,
+            "summary": {
+                "total_tests": len(test_questions),
+                "passed": passed,
+                "failed": failed,
+                "success_rate": round(passed / len(test_questions) * 100, 1)
+            },
+            "tests": results,
+            "message": "All tests passed! Perplexity API is working correctly." if failed == 0 else f"{failed} test(s) failed. Check the logs for details."
+        }
+
+    except Exception as e:
+        logger.error(f"\n❌ CRITICAL ERROR: {type(e).__name__}: {e}")
+        logger.exception("Full traceback:")
+        return {
+            "status": "error",
+            "error": f"{type(e).__name__}: {str(e)}",
+            "message": "Failed to connect to Perplexity API. Check API key and network connection.",
+            "tests": results
+        }
+
+
+@router.get("/agents/anthropic-test")
+async def test_anthropic_api():
+    """
+    Test Anthropic/Claude API with simple questions that have known answers.
+
+    This endpoint verifies that:
+    1. The API key is configured correctly
+    2. The API is responding to requests
+    3. The responses are accurate
+
+    Tests include:
+    - Capital cities of countries
+    - Colors of common objects
+    - Basic factual questions
+    """
+    logger.info("="*80)
+    logger.info("🧪 ANTHROPIC API TEST - Starting Claude API verification")
+    logger.info("="*80)
+
+    # Check if API key is configured
+    if not settings.anthropic_api_key:
+        logger.error("❌ Anthropic API key not configured")
+        return {
+            "status": "error",
+            "error": "ANTHROPIC_API_KEY not configured in Replit Secrets",
+            "message": "Please add your Anthropic API key to Replit Secrets with key name: ANTHROPIC_API_KEY"
+        }
+
+    logger.info(f"✓ API key found: {settings.anthropic_api_key[:15]}...")
+
+    # Import Anthropic client
+    try:
+        from anthropic import Anthropic
+        logger.info("✓ Anthropic library imported successfully")
+    except ImportError:
+        logger.error("❌ Anthropic library not installed")
+        return {
+            "status": "error",
+            "error": "Anthropic library not installed",
+            "message": "Run: pip install anthropic"
+        }
+
+    # Test questions with known answers
+    test_questions = [
+        {
+            "id": "capitals_1",
+            "question": "What is the capital of France? Reply with only the city name.",
+            "expected_answer": "Paris",
+            "category": "geography"
+        },
+        {
+            "id": "capitals_2",
+            "question": "What is the capital of Japan? Reply with only the city name.",
+            "expected_answer": "Tokyo",
+            "category": "geography"
+        },
+        {
+            "id": "colors_1",
+            "question": "What color is the sky on a clear day? Reply with only the color.",
+            "expected_answer": "blue",
+            "category": "colors"
+        },
+        {
+            "id": "colors_2",
+            "question": "What color are bananas when they are ripe? Reply with only the color.",
+            "expected_answer": "yellow",
+            "category": "colors"
+        },
+        {
+            "id": "math_1",
+            "question": "What is 7 + 5? Reply with only the number.",
+            "expected_answer": "12",
+            "category": "math"
+        }
+    ]
+
+    results = []
+    passed = 0
+    failed = 0
+
+    logger.info(f"\n📝 Running {len(test_questions)} test questions...")
+    logger.info("-"*80)
+
+    try:
+        # Initialize Anthropic client
+        client = Anthropic(api_key=settings.anthropic_api_key)
+        logger.info("✓ Anthropic client initialized")
+
+        # Run each test question
+        for i, test in enumerate(test_questions, 1):
+            logger.info(f"\n🔍 Test {i}/{len(test_questions)}: {test['question']}")
+            logger.info(f"   Expected: {test['expected_answer']}")
+
+            try:
+                # Make API call to Claude
+                message = client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=50,
+                    temperature=0.0,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": test['question']
+                        }
+                    ]
+                )
+
+                answer = message.content[0].text.strip()
+                logger.info(f"   Response: {answer}")
+
+                # Check if answer is correct (case-insensitive contains)
+                expected_lower = test['expected_answer'].lower()
+                answer_lower = answer.lower()
+
+                is_correct = expected_lower in answer_lower
+
+                if is_correct:
+                    logger.success(f"   ✅ PASSED - Answer contains '{test['expected_answer']}'")
+                    passed += 1
+                    test_result = "passed"
+                else:
+                    logger.error(f"   ❌ FAILED - Expected '{test['expected_answer']}' but got '{answer}'")
+                    failed += 1
+                    test_result = "failed"
+
+                results.append({
+                    "test_id": test['id'],
+                    "question": test['question'],
+                    "expected": test['expected_answer'],
+                    "actual": answer,
+                    "result": test_result,
+                    "category": test['category']
+                })
+
+            except Exception as e:
+                logger.error(f"   ❌ ERROR: {type(e).__name__}: {e}")
+                failed += 1
+                results.append({
+                    "test_id": test['id'],
+                    "question": test['question'],
+                    "expected": test['expected_answer'],
+                    "actual": None,
+                    "error": str(e),
+                    "result": "error",
+                    "category": test['category']
+                })
+
+        # Summary
+        logger.info("\n" + "="*80)
+        logger.info("📊 TEST SUMMARY")
+        logger.info("="*80)
+        logger.info(f"Total Tests:  {len(test_questions)}")
+        logger.info(f"✅ Passed:     {passed}")
+        logger.info(f"❌ Failed:     {failed}")
+        logger.info(f"Success Rate: {(passed/len(test_questions)*100):.1f}%")
+        logger.info("="*80)
+
+        overall_status = "success" if failed == 0 else "partial" if passed > 0 else "error"
+
+        return {
+            "status": overall_status,
+            "summary": {
+                "total_tests": len(test_questions),
+                "passed": passed,
+                "failed": failed,
+                "success_rate": round(passed / len(test_questions) * 100, 1)
+            },
+            "tests": results,
+            "message": "All tests passed! Anthropic API is working correctly." if failed == 0 else f"{failed} test(s) failed. Check the logs for details."
+        }
+
+    except Exception as e:
+        logger.error(f"\n❌ CRITICAL ERROR: {type(e).__name__}: {e}")
+        logger.exception("Full traceback:")
+        return {
+            "status": "error",
+            "error": f"{type(e).__name__}: {str(e)}",
+            "message": "Failed to connect to Anthropic API. Check API key and network connection.",
+            "tests": results
+        }
+
+
 @router.get("/agents/{agent_name}")
 async def get_agent_info(agent_name: str):
     """
     Get information about a specific agent.
+
+    NOTE: This route must be defined AFTER all specific routes to avoid conflicts.
     """
     if agent_name == "health-monitor":
         return health_monitor_agent.get_info()
@@ -308,378 +683,3 @@ async def quick_news_search(symbols: str = "AAPL,GOOGL,MSFT"):
     symbol_list = [s.strip().upper() for s in symbols.split(",")]
     result = await news_search_agent.execute(symbols=symbol_list)
     return result
-
-
-# ============== LLM API Test ==============
-
-@router.get("/agents/llm-test")
-async def test_llm_api():
-    """
-    Test Perplexity LLM API with simple questions that have known answers.
-
-    This endpoint verifies that:
-    1. The API key is configured correctly
-    2. The API is responding to requests
-    3. The responses are accurate
-
-    Tests include:
-    - Capital cities of countries
-    - Colors of common objects
-    - Basic factual questions
-    """
-    logger.info("="*80)
-    logger.info("🧪 LLM API TEST - Starting Perplexity API verification")
-    logger.info("="*80)
-
-    # Check if API key is configured
-    if not settings.perplexity_api_key:
-        logger.error("❌ Perplexity API key not configured")
-        return {
-            "status": "error",
-            "error": "PERPLEXITY_API_KEY not configured in Replit Secrets",
-            "message": "Please add your Perplexity API key to Replit Secrets"
-        }
-
-    logger.info(f"✓ API key found: {settings.perplexity_api_key[:15]}...")
-
-    # Import OpenAI client
-    try:
-        from openai import OpenAI
-        logger.info("✓ OpenAI library imported successfully")
-    except ImportError:
-        logger.error("❌ OpenAI library not installed")
-        return {
-            "status": "error",
-            "error": "OpenAI library not installed",
-            "message": "Run: pip install openai"
-        }
-
-    # Test questions with known answers
-    test_questions = [
-        {
-            "id": "capitals_1",
-            "question": "What is the capital of France?",
-            "expected_answer": "Paris",
-            "category": "geography"
-        },
-        {
-            "id": "capitals_2",
-            "question": "What is the capital of Japan?",
-            "expected_answer": "Tokyo",
-            "category": "geography"
-        },
-        {
-            "id": "colors_1",
-            "question": "What color is the sky on a clear day?",
-            "expected_answer": "blue",
-            "category": "colors"
-        },
-        {
-            "id": "colors_2",
-            "question": "What color are bananas when they are ripe?",
-            "expected_answer": "yellow",
-            "category": "colors"
-        },
-        {
-            "id": "facts_1",
-            "question": "How many continents are there on Earth?",
-            "expected_answer": "7",
-            "category": "facts"
-        }
-    ]
-
-    results = []
-    passed = 0
-    failed = 0
-
-    logger.info(f"\n📝 Running {len(test_questions)} test questions...")
-    logger.info("-"*80)
-
-    try:
-        # Initialize Perplexity client
-        client = OpenAI(
-            api_key=settings.perplexity_api_key,
-            base_url="https://api.perplexity.ai"
-        )
-        logger.info("✓ Perplexity client initialized")
-
-        # Run each test question
-        for i, test in enumerate(test_questions, 1):
-            logger.info(f"\n🔍 Test {i}/{len(test_questions)}: {test['question']}")
-            logger.info(f"   Expected: {test['expected_answer']}")
-
-            try:
-                # Make API call
-                response = client.chat.completions.create(
-                    model="llama-3.1-sonar-small-128k-online",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful assistant. Answer questions concisely with just the answer, no explanations."
-                        },
-                        {
-                            "role": "user",
-                            "content": test['question']
-                        }
-                    ],
-                    temperature=0.0,
-                    max_tokens=50
-                )
-
-                answer = response.choices[0].message.content.strip()
-                logger.info(f"   Response: {answer}")
-
-                # Check if answer is correct (case-insensitive contains)
-                expected_lower = test['expected_answer'].lower()
-                answer_lower = answer.lower()
-
-                is_correct = expected_lower in answer_lower
-
-                if is_correct:
-                    logger.success(f"   ✅ PASSED - Answer contains '{test['expected_answer']}'")
-                    passed += 1
-                    test_result = "passed"
-                else:
-                    logger.error(f"   ❌ FAILED - Expected '{test['expected_answer']}' but got '{answer}'")
-                    failed += 1
-                    test_result = "failed"
-
-                results.append({
-                    "test_id": test['id'],
-                    "question": test['question'],
-                    "expected": test['expected_answer'],
-                    "actual": answer,
-                    "result": test_result,
-                    "category": test['category']
-                })
-
-            except Exception as e:
-                logger.error(f"   ❌ ERROR: {type(e).__name__}: {e}")
-                failed += 1
-                results.append({
-                    "test_id": test['id'],
-                    "question": test['question'],
-                    "expected": test['expected_answer'],
-                    "actual": None,
-                    "error": str(e),
-                    "result": "error",
-                    "category": test['category']
-                })
-
-        # Summary
-        logger.info("\n" + "="*80)
-        logger.info("📊 TEST SUMMARY")
-        logger.info("="*80)
-        logger.info(f"Total Tests:  {len(test_questions)}")
-        logger.info(f"✅ Passed:     {passed}")
-        logger.info(f"❌ Failed:     {failed}")
-        logger.info(f"Success Rate: {(passed/len(test_questions)*100):.1f}%")
-        logger.info("="*80)
-
-        overall_status = "success" if failed == 0 else "partial" if passed > 0 else "error"
-
-        return {
-            "status": overall_status,
-            "summary": {
-                "total_tests": len(test_questions),
-                "passed": passed,
-                "failed": failed,
-                "success_rate": round(passed / len(test_questions) * 100, 1)
-            },
-            "tests": results,
-            "message": "All tests passed! Perplexity API is working correctly." if failed == 0 else f"{failed} test(s) failed. Check the logs for details."
-        }
-
-    except Exception as e:
-        logger.error(f"\n❌ CRITICAL ERROR: {type(e).__name__}: {e}")
-        logger.exception("Full traceback:")
-        return {
-            "status": "error",
-            "error": f"{type(e).__name__}: {str(e)}",
-            "message": "Failed to connect to Perplexity API. Check API key and network connection.",
-            "tests": results
-        }
-
-
-# ============== Anthropic/Claude API Test ==============
-
-@router.get("/agents/anthropic-test")
-async def test_anthropic_api():
-    """
-    Test Anthropic/Claude API with simple questions that have known answers.
-
-    This endpoint verifies that:
-    1. The API key is configured correctly
-    2. The API is responding to requests
-    3. The responses are accurate
-
-    Tests include:
-    - Capital cities of countries
-    - Colors of common objects
-    - Basic factual questions
-    """
-    logger.info("="*80)
-    logger.info("🧪 ANTHROPIC API TEST - Starting Claude API verification")
-    logger.info("="*80)
-
-    # Check if API key is configured
-    if not settings.anthropic_api_key:
-        logger.error("❌ Anthropic API key not configured")
-        return {
-            "status": "error",
-            "error": "ANTHROPIC_API_KEY not configured in Replit Secrets",
-            "message": "Please add your Anthropic API key to Replit Secrets with key name: ANTHROPIC_API_KEY"
-        }
-
-    logger.info(f"✓ API key found: {settings.anthropic_api_key[:15]}...")
-
-    # Import Anthropic client
-    try:
-        from anthropic import Anthropic
-        logger.info("✓ Anthropic library imported successfully")
-    except ImportError:
-        logger.error("❌ Anthropic library not installed")
-        return {
-            "status": "error",
-            "error": "Anthropic library not installed",
-            "message": "Run: pip install anthropic"
-        }
-
-    # Test questions with known answers
-    test_questions = [
-        {
-            "id": "capitals_1",
-            "question": "What is the capital of France? Reply with only the city name.",
-            "expected_answer": "Paris",
-            "category": "geography"
-        },
-        {
-            "id": "capitals_2",
-            "question": "What is the capital of Japan? Reply with only the city name.",
-            "expected_answer": "Tokyo",
-            "category": "geography"
-        },
-        {
-            "id": "colors_1",
-            "question": "What color is the sky on a clear day? Reply with only the color.",
-            "expected_answer": "blue",
-            "category": "colors"
-        },
-        {
-            "id": "colors_2",
-            "question": "What color are bananas when they are ripe? Reply with only the color.",
-            "expected_answer": "yellow",
-            "category": "colors"
-        },
-        {
-            "id": "math_1",
-            "question": "What is 7 + 5? Reply with only the number.",
-            "expected_answer": "12",
-            "category": "math"
-        }
-    ]
-
-    results = []
-    passed = 0
-    failed = 0
-
-    logger.info(f"\n📝 Running {len(test_questions)} test questions...")
-    logger.info("-"*80)
-
-    try:
-        # Initialize Anthropic client
-        client = Anthropic(api_key=settings.anthropic_api_key)
-        logger.info("✓ Anthropic client initialized")
-
-        # Run each test question
-        for i, test in enumerate(test_questions, 1):
-            logger.info(f"\n🔍 Test {i}/{len(test_questions)}: {test['question']}")
-            logger.info(f"   Expected: {test['expected_answer']}")
-
-            try:
-                # Make API call to Claude
-                message = client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=50,
-                    temperature=0.0,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": test['question']
-                        }
-                    ]
-                )
-
-                answer = message.content[0].text.strip()
-                logger.info(f"   Response: {answer}")
-
-                # Check if answer is correct (case-insensitive contains)
-                expected_lower = test['expected_answer'].lower()
-                answer_lower = answer.lower()
-
-                is_correct = expected_lower in answer_lower
-
-                if is_correct:
-                    logger.success(f"   ✅ PASSED - Answer contains '{test['expected_answer']}'")
-                    passed += 1
-                    test_result = "passed"
-                else:
-                    logger.error(f"   ❌ FAILED - Expected '{test['expected_answer']}' but got '{answer}'")
-                    failed += 1
-                    test_result = "failed"
-
-                results.append({
-                    "test_id": test['id'],
-                    "question": test['question'],
-                    "expected": test['expected_answer'],
-                    "actual": answer,
-                    "result": test_result,
-                    "category": test['category']
-                })
-
-            except Exception as e:
-                logger.error(f"   ❌ ERROR: {type(e).__name__}: {e}")
-                failed += 1
-                results.append({
-                    "test_id": test['id'],
-                    "question": test['question'],
-                    "expected": test['expected_answer'],
-                    "actual": None,
-                    "error": str(e),
-                    "result": "error",
-                    "category": test['category']
-                })
-
-        # Summary
-        logger.info("\n" + "="*80)
-        logger.info("📊 TEST SUMMARY")
-        logger.info("="*80)
-        logger.info(f"Total Tests:  {len(test_questions)}")
-        logger.info(f"✅ Passed:     {passed}")
-        logger.info(f"❌ Failed:     {failed}")
-        logger.info(f"Success Rate: {(passed/len(test_questions)*100):.1f}%")
-        logger.info("="*80)
-
-        overall_status = "success" if failed == 0 else "partial" if passed > 0 else "error"
-
-        return {
-            "status": overall_status,
-            "summary": {
-                "total_tests": len(test_questions),
-                "passed": passed,
-                "failed": failed,
-                "success_rate": round(passed / len(test_questions) * 100, 1)
-            },
-            "tests": results,
-            "message": "All tests passed! Anthropic API is working correctly." if failed == 0 else f"{failed} test(s) failed. Check the logs for details."
-        }
-
-    except Exception as e:
-        logger.error(f"\n❌ CRITICAL ERROR: {type(e).__name__}: {e}")
-        logger.exception("Full traceback:")
-        return {
-            "status": "error",
-            "error": f"{type(e).__name__}: {str(e)}",
-            "message": "Failed to connect to Anthropic API. Check API key and network connection.",
-            "tests": results
-        }
