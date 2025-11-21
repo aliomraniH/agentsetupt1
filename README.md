@@ -126,6 +126,16 @@ curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/code/review \
 
 **Full documentation:** See [CLAUDE_AGENT_USAGE.md](./CLAUDE_AGENT_USAGE.md) for detailed usage guide
 
+**Integration Examples:**
+
+```bash
+# Get stock data analysis with Claude
+stocks=$(curl http://localhost:8080/api/v1/agents/stock-monitor/quick)
+curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/analyze \
+  -H "Content-Type: application/json" \
+  -d "{\"message\": \"Analyze this stock data: $stocks\"}"
+```
+
 ## GitHub Actions
 
 ### Workflows

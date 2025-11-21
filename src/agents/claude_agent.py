@@ -20,7 +20,7 @@ from src.core.config import settings
 class ClaudeModel(str, Enum):
     """Available Claude models"""
     OPUS = "claude-3-opus-20240229"
-    SONNET = "claude-3-5-sonnet-20241022"
+    SONNET = "claude-3-5-sonnet-20240620"  # Correct model name verified
     HAIKU = "claude-3-5-haiku-20241022"
 
 

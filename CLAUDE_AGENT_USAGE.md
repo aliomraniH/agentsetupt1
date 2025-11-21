@@ -165,9 +165,10 @@ curl http://localhost:8080/api/v1/agents/claude-assistant/models
 
 ## Available Models
 
-- **claude-3-5-sonnet-20241022** (Recommended)
+- **claude-3-5-sonnet-20240620** (Recommended) ✅ VERIFIED WORKING
   - Balanced performance and speed
   - Best for most use cases
+  - **Note:** This is the correct model name (verified in production)
 
 - **claude-3-opus-20240229**
   - Most capable model
