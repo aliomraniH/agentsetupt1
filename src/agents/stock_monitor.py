@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 import asyncio
 import time
+import json
+import re
 from loguru import logger
 
 try:
@@ -180,7 +182,6 @@ Requirements:
                 content = content.strip()
 
                 # Parse JSON
-                import json
                 data = json.loads(content)
 
                 # Validate and format response
@@ -261,9 +262,6 @@ Requirements:
                     if script.string and 'root.App.main' in script.string:
                         try:
                             # Extract JSON from the script
-                            import json
-                            import re
-
                             # Find the JSON object
                             match = re.search(r'root\.App\.main\s*=\s*({.*?});', script.string, re.DOTALL)
                             if match:
