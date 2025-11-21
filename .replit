@@ -19,6 +19,10 @@ deploymentTarget = "autoscale"
 localPort = 8080
 externalPort = 8080
 
+[[ports]]
+localPort = 39681
+externalPort = 80
+
 [agent]
 expertMode = true
 
