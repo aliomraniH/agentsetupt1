@@ -32,5 +32,6 @@ yfinance==0.2.33
 beautifulsoup4==4.12.2
 lxml==5.1.0
 
-# LLM for intelligent data fetching
-openai==1.54.0
+# LLM APIs for intelligent data fetching and analysis
+openai==1.54.0  # For Perplexity API compatibility
+anthropic==0.39.0  # For Claude API

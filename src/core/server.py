@@ -13,13 +13,27 @@ from src.core.config import settings
 from src.api.routes import health, agents
 
 
-# Configure logging
-logger.remove()
+# Configure logging - ensure all logs go to stdout for Replit console
+logger.remove()  # Remove default handler
+
+# Add stdout handler with INFO level (captures all our application logs)
 logger.add(
     sys.stdout,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="DEBUG" if settings.debug else "INFO"
+    level="INFO",  # Always INFO to ensure logs are visible in Replit console
+    colorize=True,
+    backtrace=True,
+    diagnose=True
 )
+
+# Also add a debug handler if debug mode is enabled
+if settings.debug:
+    logger.add(
+        sys.stderr,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        level="DEBUG",
+        colorize=False
+    )
 
 # Create FastAPI application
 app = FastAPI(
@@ -42,6 +56,24 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
     expose_headers=["*"],  # Expose all response headers to the browser
 )
+
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests for debugging visibility in Replit console"""
+    logger.info(f"📥 Incoming request: {request.method} {request.url.path}")
+
+    # Process the request
+    start_time = datetime.now(timezone.utc)
+    response = await call_next(request)
+    end_time = datetime.now(timezone.utc)
+
+    # Log response
+    duration_ms = (end_time - start_time).total_seconds() * 1000
+    logger.info(f"📤 Response: {response.status_code} | {duration_ms:.0f}ms")
+
+    return response
 
 
 # Global exception handler
