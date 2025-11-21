@@ -117,6 +117,145 @@ class StockMonitorAgent(BaseAgent):
         elapsed = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
         return elapsed < self._cache_ttl
 
+    async def _fetch_with_alpha_vantage(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using Alpha Vantage API (GLOBAL_QUOTE endpoint).
+        This is the most reliable structured data source.
+
+        API Limits: 25 calls/day, 5 calls/minute (free tier)
+
+        Args:
+            symbols: List of stock symbols to fetch
+
+        Returns:
+            Dict mapping symbols to their data
+        """
+        if httpx is None:
+            logger.error("❌ httpx not installed - skipping Alpha Vantage")
+            return {symbol: {"symbol": symbol, "error": "httpx not installed", "status": "error"}
+                    for symbol in symbols}
+
+        if not settings.alpha_vantage_api_key:
+            logger.warning("⚠️  Alpha Vantage API key not configured - skipping")
+            return {symbol: {"symbol": symbol, "error": "Alpha Vantage API not configured", "status": "error"}
+                    for symbol in symbols}
+
+        logger.info(f"✓ Alpha Vantage API key found: {settings.alpha_vantage_api_key[:10]}...")
+        logger.info(f"📊 Fetching {len(symbols)} stocks from Alpha Vantage...")
+
+        results = {}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for symbol in symbols:
+                try:
+                    logger.info(f"  → Fetching {symbol} from Alpha Vantage GLOBAL_QUOTE...")
+
+                    url = "https://www.alphavantage.co/query"
+                    params = {
+                        "function": "GLOBAL_QUOTE",
+                        "symbol": symbol,
+                        "apikey": settings.alpha_vantage_api_key
+                    }
+
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Check for API errors
+                    if "Global Quote" not in data:
+                        error_msg = data.get('Note', data.get('Error Message', data.get('Information', 'Unknown error')))
+                        logger.error(f"  ✗ {symbol}: Alpha Vantage API error - {error_msg}")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": f"API: {error_msg}",
+                            "status": "error"
+                        }
+                        continue
+
+                    quote = data["Global Quote"]
+
+                    # Check if quote is empty (invalid symbol)
+                    if not quote or "01. symbol" not in quote:
+                        logger.error(f"  ✗ {symbol}: No data returned (invalid symbol?)")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": "No data available",
+                            "status": "error"
+                        }
+                        continue
+
+                    # Extract data from Alpha Vantage format
+                    current_price = float(quote.get("05. price", 0))
+                    previous_close = float(quote.get("08. previous close", 0))
+                    change = float(quote.get("09. change", 0))
+                    change_percent_str = quote.get("10. change percent", "0%").replace("%", "")
+                    change_percent = float(change_percent_str)
+                    volume = int(quote.get("06. volume", 0))
+
+                    # Validate data
+                    if current_price <= 0:
+                        logger.error(f"  ✗ {symbol}: Invalid price ${current_price}")
+                        results[symbol] = {
+                            "symbol": symbol,
+                            "error": f"Invalid price: ${current_price}",
+                            "status": "error"
+                        }
+                        continue
+
+                    # Log success
+                    logger.info(f"  ✓ {symbol}: ${current_price} ({change_percent:+.2f}%) from Alpha Vantage")
+
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "name": symbol,  # Alpha Vantage GLOBAL_QUOTE doesn't provide company name
+                        "current_price": round(current_price, 2),
+                        "previous_close": round(previous_close, 2),
+                        "change": round(change, 2),
+                        "change_percent": round(change_percent, 2),
+                        "volume": volume,
+                        "volume_formatted": self._format_volume(volume),
+                        "status": "success"
+                    }
+
+                    # Rate limiting: 5 calls/minute = wait 12 seconds between calls
+                    if len(symbols) > 1:
+                        await asyncio.sleep(0.5)  # Small delay to avoid hitting rate limit
+
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"  ✗ {symbol}: HTTP {e.response.status_code}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"HTTP {e.response.status_code}",
+                        "status": "error"
+                    }
+                except httpx.TimeoutException:
+                    logger.error(f"  ✗ {symbol}: Request timeout")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": "Timeout",
+                        "status": "error"
+                    }
+                except (ValueError, KeyError) as e:
+                    logger.error(f"  ✗ {symbol}: Data parsing error - {e}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"Parse error: {str(e)}",
+                        "status": "error"
+                    }
+                except Exception as e:
+                    logger.error(f"  ✗ {symbol}: {type(e).__name__}: {e}")
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "error": f"{type(e).__name__}: {str(e)}",
+                        "status": "error"
+                    }
+
+        # Summary
+        successful = sum(1 for r in results.values() if r.get("status") == "success")
+        logger.info(f"✓ Alpha Vantage: {successful}/{len(symbols)} stocks fetched successfully")
+
+        return results
+
     async def _fetch_with_llm_search(self, symbols: List[str]) -> Dict[str, Any]:
         """
         Fetch stock data using LLM-powered search (Perplexity) with multi-step validation.
@@ -802,25 +941,29 @@ Example: 25000000"""
         if debug_metadata:
             debug_metadata["fetch_order"].append("Starting fresh data fetch")
 
-        # Strategy: Try yfinance first (more reliable official API), then web scraping as fallback
-        if yf is not None:
-            logger.info("Using yfinance as primary data source")
-            if debug_metadata:
-                debug_metadata["fetch_order"].append("Attempting yfinance for all symbols")
-            results_dict = await self._fetch_batch_data(stock_symbols)
+        logger.info("="*80)
+        logger.info(f"🚀 STOCK MONITOR - Fetching {len(stock_symbols)} stocks: {stock_symbols}")
+        logger.info("="*80)
 
-            # Track which stocks succeeded with yfinance
+        # === TIER 1: Alpha Vantage (Primary - Most Reliable Structured Data) ===
+        results_dict = {}
+        if settings.alpha_vantage_api_key:
+            logger.info("📊 TIER 1: Attempting Alpha Vantage API...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 1: Attempting Alpha Vantage for all symbols")
+            results_dict = await self._fetch_with_alpha_vantage(stock_symbols)
+
+            # Track which stocks succeeded with Alpha Vantage
             if debug_metadata:
                 for symbol, data in results_dict.items():
                     if data.get("status") == "success":
-                        debug_metadata["data_sources"][symbol] = "yfinance"
+                        debug_metadata["data_sources"][symbol] = "alpha_vantage"
         else:
-            logger.warning("yfinance not available, using web scraping only")
+            logger.warning("⚠️  Alpha Vantage API key not configured - skipping Tier 1")
             if debug_metadata:
-                debug_metadata["fetch_order"].append("yfinance not available - will use web scraping")
-            results_dict = {}
+                debug_metadata["fetch_order"].append("Tier 1: Alpha Vantage skipped (no API key)")
 
-        # Check which stocks succeeded/failed with yfinance download
+        # Check which stocks succeeded/failed
         failed_symbols = [symbol for symbol, data in results_dict.items() if data.get("status") == "error"]
 
         # Also check for missing symbols
@@ -828,11 +971,40 @@ Example: 25000000"""
             if symbol not in results_dict:
                 failed_symbols.append(symbol)
 
-        # If any stocks failed with yfinance download, try Ticker API
+        logger.info(f"📊 Tier 1 Results: {len(stock_symbols) - len(failed_symbols)}/{len(stock_symbols)} successful")
+        if failed_symbols:
+            logger.info(f"⚠️  {len(failed_symbols)} stocks need fallback: {failed_symbols}")
+
+        # === TIER 2: yfinance (Fallback for Alpha Vantage failures) ===
         if failed_symbols and yf is not None:
-            logger.info(f"Retrying {len(failed_symbols)} failed stocks with yfinance Ticker API: {failed_symbols}")
+            logger.info(f"📈 TIER 2: Retrying {len(failed_symbols)} stocks with yfinance...")
             if debug_metadata:
-                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with yfinance Ticker API")
+                debug_metadata["fetch_order"].append(f"Tier 2: Attempting yfinance for {len(failed_symbols)} symbols")
+            yf_results = await self._fetch_batch_data(failed_symbols)
+
+            # Merge successful yfinance results
+            still_failed = []
+            for symbol in failed_symbols:
+                if yf_results.get(symbol, {}).get("status") == "success":
+                    results_dict[symbol] = yf_results[symbol]
+                    logger.info(f"✓ {symbol}: Fetched from yfinance")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "yfinance"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+            logger.info(f"📈 Tier 2 Results: {len(failed_symbols)} still need fallback")
+        elif failed_symbols:
+            logger.warning("⚠️  yfinance not available for Tier 2 fallback")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append("Tier 2: yfinance not available")
+
+        # === TIER 3: yfinance Ticker API (For individual stock details) ===
+        if failed_symbols and yf is not None:
+            logger.info(f"📊 TIER 3: Retrying {len(failed_symbols)} stocks with yfinance Ticker API...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 3: Attempting yfinance Ticker API for {len(failed_symbols)} symbols")
             ticker_results = await self._fetch_ticker_info(failed_symbols)
 
             # Merge successful Ticker API results
@@ -840,19 +1012,20 @@ Example: 25000000"""
             for symbol in failed_symbols:
                 if ticker_results[symbol].get("status") == "success":
                     results_dict[symbol] = ticker_results[symbol]
-                    logger.info(f"Successfully fetched {symbol} data from Ticker API")
+                    logger.info(f"✓ {symbol}: Fetched from yfinance Ticker API")
                     if debug_metadata:
                         debug_metadata["data_sources"][symbol] = "yfinance_ticker_api"
                 else:
                     still_failed.append(symbol)
 
             failed_symbols = still_failed
+            logger.info(f"📊 Tier 3 Results: {len(failed_symbols)} still need fallback")
 
-        # If still have failures, try LLM-powered search (Perplexity)
+        # === TIER 4: Perplexity LLM Search (Intelligent fallback with validation) ===
         if failed_symbols and settings.perplexity_api_key:
-            logger.info(f"Retrying {len(failed_symbols)} failed stocks with LLM search: {failed_symbols}")
+            logger.info(f"🤖 TIER 4: Retrying {len(failed_symbols)} stocks with Perplexity LLM...")
             if debug_metadata:
-                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with LLM search (Perplexity)")
+                debug_metadata["fetch_order"].append(f"Tier 4: Attempting Perplexity LLM for {len(failed_symbols)} symbols")
             llm_results = await self._fetch_with_llm_search(failed_symbols)
 
             # Merge successful LLM results
@@ -860,33 +1033,43 @@ Example: 25000000"""
             for symbol in failed_symbols:
                 if llm_results[symbol].get("status") == "success":
                     results_dict[symbol] = llm_results[symbol]
-                    logger.info(f"Successfully fetched {symbol} data from LLM search")
+                    logger.info(f"✓ {symbol}: Fetched from Perplexity LLM")
                     if debug_metadata:
                         debug_metadata["data_sources"][symbol] = "llm_search"
                 else:
                     still_failed.append(symbol)
 
             failed_symbols = still_failed
-
-        # If still have failures, try web scraping as final fallback
-        if failed_symbols:
-            logger.info(f"Retrying {len(failed_symbols)} failed stocks with web scraping: {failed_symbols}")
+            logger.info(f"🤖 Tier 4 Results: {len(failed_symbols)} still need fallback")
+        elif failed_symbols and not settings.perplexity_api_key:
+            logger.warning("⚠️  Perplexity API key not configured - skipping Tier 4")
             if debug_metadata:
-                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with web scraping: {failed_symbols}")
+                debug_metadata["fetch_order"].append("Tier 4: Perplexity skipped (no API key)")
+
+        # === TIER 5: Web Scraping (Last resort - less reliable) ===
+        if failed_symbols:
+            logger.info(f"🌐 TIER 5: Last resort - web scraping {len(failed_symbols)} stocks...")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Tier 5: Web scraping for {len(failed_symbols)} symbols: {failed_symbols}")
             scraping_results = await self._fetch_stocks_web_scraping(failed_symbols)
 
             # Merge successful scraping results back
             for symbol in failed_symbols:
                 if scraping_results[symbol].get("status") == "success":
                     results_dict[symbol] = scraping_results[symbol]
-                    logger.info(f"Successfully fetched {symbol} data from web scraping")
+                    logger.info(f"✓ {symbol}: Fetched from web scraping")
                     if debug_metadata:
                         debug_metadata["data_sources"][symbol] = "web_scraping"
                 elif symbol not in results_dict:
                     # Keep the error result
                     results_dict[symbol] = scraping_results[symbol]
+                    logger.warning(f"✗ {symbol}: All tiers failed")
                     if debug_metadata:
                         debug_metadata["data_sources"][symbol] = "failed"
+
+        logger.info("="*80)
+        logger.info(f"✅ FETCH COMPLETE: {len([r for r in results_dict.values() if r.get('status') == 'success'])}/{len(stock_symbols)} successful")
+        logger.info("="*80)
 
         # Final validation: Detect suspicious data patterns
         successful_data = {symbol: data for symbol, data in results_dict.items()
@@ -1010,6 +1193,7 @@ Example: 25000000"""
         # Add debug metadata if requested
         if debug_metadata:
             debug_metadata["summary"] = {
+                "alpha_vantage_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "alpha_vantage"),
                 "yfinance_download_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
                 "yfinance_ticker_api_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance_ticker_api"),
                 "llm_search_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "llm_search"),
@@ -1020,6 +1204,24 @@ Example: 25000000"""
                 "has_warnings": len(debug_metadata["validation_warnings"]) > 0
             }
             result["_debug"] = debug_metadata
+
+            # Print comprehensive debug summary to console
+            logger.info("\n" + "="*80)
+            logger.info("📊 DEBUG SUMMARY")
+            logger.info("="*80)
+            logger.info(f"Data Sources Used:")
+            logger.info(f"  • Alpha Vantage:     {debug_metadata['summary']['alpha_vantage_count']} stocks")
+            logger.info(f"  • yfinance (batch):  {debug_metadata['summary']['yfinance_download_count']} stocks")
+            logger.info(f"  • yfinance (ticker): {debug_metadata['summary']['yfinance_ticker_api_count']} stocks")
+            logger.info(f"  • Perplexity LLM:    {debug_metadata['summary']['llm_search_count']} stocks")
+            logger.info(f"  • Web Scraping:      {debug_metadata['summary']['web_scraping_count']} stocks")
+            logger.info(f"  • Failed:            {debug_metadata['summary']['failed_count']} stocks")
+            logger.info(f"\nValidation:")
+            logger.info(f"  • Warnings:          {debug_metadata['summary']['validation_warnings_count']}")
+            if debug_metadata["validation_warnings"]:
+                for warning in debug_metadata["validation_warnings"]:
+                    logger.warning(f"    ⚠️  {warning}")
+            logger.info("="*80 + "\n")
 
         # Cache the result (but don't cache debug metadata)
         result_to_cache = {k: v for k, v in result.items() if k != "_debug"}
