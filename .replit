@@ -1,4 +1,4 @@
-run = "pip install -r requirements.txt && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
+run = "python scripts/check_dependencies.py && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload"
 entrypoint = "src/core/server.py"
 modules = ["python-3.11"]
 
@@ -10,7 +10,7 @@ PYTHONPATH = "${REPL_HOME}"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 [deployment]
-build = ["sh", "-c", "pip install --no-user -r requirements.txt"]
+build = ["sh", "-c", "pip install --no-user --upgrade pip && pip install --no-user -r requirements.txt"]
 run = ["python", "-m", "uvicorn", "src.core.server:app", "--host", "0.0.0.0", "--port", "8080"]
 deploymentTarget = "autoscale"
 
