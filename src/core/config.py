@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # External services (for future use)
     anthropic_api_key: Optional[str] = None
+    perplexity_api_key: Optional[str] = None
 
     class Config:
         env_file = ".env"

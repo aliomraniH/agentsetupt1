@@ -23,7 +23,13 @@ except ImportError:
     httpx = None
     BeautifulSoup = None
 
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
+
 from src.agents.base import BaseAgent
+from src.core.config import settings
 
 
 class StockCategory(str, Enum):
@@ -108,6 +114,117 @@ class StockMonitorAgent(BaseAgent):
             return False
         elapsed = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
         return elapsed < self._cache_ttl
+
+    async def _fetch_with_llm_search(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Fetch stock data using LLM-powered search (Perplexity).
+        More reliable than web scraping as LLM can understand and extract data from various sources.
+        """
+        if AsyncOpenAI is None or not settings.perplexity_api_key:
+            logger.warning("Perplexity API not configured - skipping LLM search")
+            return {symbol: {"symbol": symbol, "error": "Perplexity API not configured", "status": "error"}
+                    for symbol in symbols}
+
+        results = {}
+
+        # Initialize Perplexity client (uses OpenAI-compatible API)
+        client = AsyncOpenAI(
+            api_key=settings.perplexity_api_key,
+            base_url="https://api.perplexity.ai"
+        )
+
+        for symbol in symbols:
+            try:
+                # Craft a precise prompt for stock data
+                prompt = f"""Get the latest stock data for {symbol}. Return ONLY a JSON object with this exact structure (no markdown, no explanation):
+{{
+  "symbol": "{symbol}",
+  "current_price": <latest price as number>,
+  "previous_close": <previous day close as number>,
+  "change": <price change as number>,
+  "change_percent": <percent change as number>,
+  "volume": <trading volume as integer>,
+  "company_name": "<full company name>"
+}}
+
+Requirements:
+- All prices must be in USD
+- Use the most recent trading data available
+- Return only valid JSON, no additional text
+- Ensure all numeric fields are actual numbers, not strings"""
+
+                response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",  # Perplexity's fast search model
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a financial data extraction assistant. Return only valid JSON with stock data, no explanations or markdown."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.0,  # Deterministic output
+                    max_tokens=500
+                )
+
+                # Parse LLM response
+                content = response.choices[0].message.content.strip()
+
+                # Remove markdown code blocks if present
+                if content.startswith("```"):
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                content = content.strip()
+
+                # Parse JSON
+                import json
+                data = json.loads(content)
+
+                # Validate and format response
+                current_price = float(data.get("current_price", 0))
+                previous_close = float(data.get("previous_close", 0))
+                change = float(data.get("change", 0))
+                change_percent = float(data.get("change_percent", 0))
+                volume = int(data.get("volume", 0)) if data.get("volume") else None
+
+                # Recalculate if needed
+                if not change and current_price and previous_close:
+                    change = current_price - previous_close
+                if not change_percent and current_price and previous_close:
+                    change_percent = (change / previous_close) * 100
+
+                results[symbol] = {
+                    "symbol": symbol,
+                    "name": data.get("company_name", symbol),
+                    "current_price": round(current_price, 2),
+                    "previous_close": round(previous_close, 2),
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "volume": volume,
+                    "volume_formatted": self._format_volume(volume) if volume else "N/A",
+                    "status": "success"
+                }
+                logger.info(f"Successfully fetched {symbol} via LLM search")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"LLM returned invalid JSON for {symbol}: {content[:200]}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"LLM JSON parse error: {str(e)}",
+                    "status": "error"
+                }
+            except Exception as e:
+                logger.error(f"LLM search error for {symbol}: {e}")
+                results[symbol] = {
+                    "symbol": symbol,
+                    "error": f"LLM search error: {str(e)}",
+                    "status": "error"
+                }
+
+        return results
 
     async def _scrape_yahoo_finance(self, symbol: str) -> Dict[str, Any]:
         """
@@ -682,6 +799,26 @@ class StockMonitorAgent(BaseAgent):
 
             failed_symbols = still_failed
 
+        # If still have failures, try LLM-powered search (Perplexity)
+        if failed_symbols and settings.perplexity_api_key:
+            logger.info(f"Retrying {len(failed_symbols)} failed stocks with LLM search: {failed_symbols}")
+            if debug_metadata:
+                debug_metadata["fetch_order"].append(f"Retrying {len(failed_symbols)} stocks with LLM search (Perplexity)")
+            llm_results = await self._fetch_with_llm_search(failed_symbols)
+
+            # Merge successful LLM results
+            still_failed = []
+            for symbol in failed_symbols:
+                if llm_results[symbol].get("status") == "success":
+                    results_dict[symbol] = llm_results[symbol]
+                    logger.info(f"Successfully fetched {symbol} data from LLM search")
+                    if debug_metadata:
+                        debug_metadata["data_sources"][symbol] = "llm_search"
+                else:
+                    still_failed.append(symbol)
+
+            failed_symbols = still_failed
+
         # If still have failures, try web scraping as final fallback
         if failed_symbols:
             logger.info(f"Retrying {len(failed_symbols)} failed stocks with web scraping: {failed_symbols}")
@@ -826,6 +963,7 @@ class StockMonitorAgent(BaseAgent):
             debug_metadata["summary"] = {
                 "yfinance_download_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance"),
                 "yfinance_ticker_api_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "yfinance_ticker_api"),
+                "llm_search_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "llm_search"),
                 "web_scraping_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "web_scraping"),
                 "demo_data_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "demo_data_fallback"),
                 "failed_count": sum(1 for src in debug_metadata["data_sources"].values() if src == "failed"),
