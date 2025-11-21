@@ -122,21 +122,35 @@ class StockMonitorAgent(BaseAgent):
         Fetch stock data using LLM-powered search (Perplexity).
         More reliable than web scraping as LLM can understand and extract data from various sources.
         """
-        if AsyncOpenAI is None or not settings.perplexity_api_key:
-            logger.warning("Perplexity API not configured - skipping LLM search")
+        if AsyncOpenAI is None:
+            logger.error("AsyncOpenAI not installed - skipping LLM search")
+            return {symbol: {"symbol": symbol, "error": "AsyncOpenAI not installed", "status": "error"}
+                    for symbol in symbols}
+
+        if not settings.perplexity_api_key:
+            logger.error("Perplexity API key not configured - skipping LLM search")
             return {symbol: {"symbol": symbol, "error": "Perplexity API not configured", "status": "error"}
                     for symbol in symbols}
 
+        logger.info(f"✓ Perplexity API key found: {settings.perplexity_api_key[:15]}...")
         results = {}
 
         # Initialize Perplexity client (uses OpenAI-compatible API)
-        client = AsyncOpenAI(
-            api_key=settings.perplexity_api_key,
-            base_url="https://api.perplexity.ai"
-        )
+        try:
+            client = AsyncOpenAI(
+                api_key=settings.perplexity_api_key,
+                base_url="https://api.perplexity.ai"
+            )
+            logger.info("✓ Perplexity client initialized")
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize Perplexity client: {e}")
+            return {symbol: {"symbol": symbol, "error": f"Client init: {str(e)}", "status": "error"}
+                    for symbol in symbols}
 
         for symbol in symbols:
             try:
+                logger.info(f"→ Calling Perplexity for {symbol}...")
+
                 # Craft a precise prompt for stock data
                 prompt = f"""Get the latest stock data for {symbol}. Return ONLY a JSON object with this exact structure (no markdown, no explanation):
 {{
@@ -156,7 +170,7 @@ Requirements:
 - Ensure all numeric fields are actual numbers, not strings"""
 
                 response = await client.chat.completions.create(
-                    model="llama-3.1-sonar-small-128k-online",  # Perplexity's fast search model
+                    model="llama-3.1-sonar-small-128k-online",
                     messages=[
                         {
                             "role": "system",
@@ -167,12 +181,13 @@ Requirements:
                             "content": prompt
                         }
                     ],
-                    temperature=0.0,  # Deterministic output
+                    temperature=0.0,
                     max_tokens=500
                 )
 
                 # Parse LLM response
                 content = response.choices[0].message.content.strip()
+                logger.info(f"← Perplexity response for {symbol}: {content[:150]}...")
 
                 # Remove markdown code blocks if present
                 if content.startswith("```"):
@@ -208,20 +223,21 @@ Requirements:
                     "volume_formatted": self._format_volume(volume) if volume else "N/A",
                     "status": "success"
                 }
-                logger.info(f"Successfully fetched {symbol} via LLM search")
+                logger.info(f"✓ {symbol}: ${current_price} via LLM")
 
             except json.JSONDecodeError as e:
-                logger.error(f"LLM returned invalid JSON for {symbol}: {content[:200]}")
+                logger.error(f"✗ {symbol}: JSON parse error - {content[:150] if 'content' in locals() else 'N/A'}")
+                logger.error(f"  Error: {e}")
                 results[symbol] = {
                     "symbol": symbol,
-                    "error": f"LLM JSON parse error: {str(e)}",
+                    "error": f"JSON parse: {str(e)}",
                     "status": "error"
                 }
             except Exception as e:
-                logger.error(f"LLM search error for {symbol}: {e}")
+                logger.error(f"✗ {symbol}: {type(e).__name__}: {e}")
                 results[symbol] = {
                     "symbol": symbol,
-                    "error": f"LLM search error: {str(e)}",
+                    "error": f"{type(e).__name__}: {str(e)}",
                     "status": "error"
                 }
 
