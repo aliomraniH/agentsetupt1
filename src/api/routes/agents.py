@@ -6,9 +6,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 
-from src.agents import HealthMonitorAgent, StockMonitorAgent
+from src.agents import HealthMonitorAgent, StockMonitorAgent, ClaudeAgent
 from src.agents.health_monitor import health_monitor_agent, ServiceType
 from src.agents.stock_monitor import stock_monitor_agent
+from src.agents.claude_agent import claude_agent, ClaudeModel
 
 router = APIRouter()
 
@@ -35,6 +36,37 @@ class RunStockCheckRequest(BaseModel):
     symbols: Optional[List[str]] = None
 
 
+class ClaudeRequest(BaseModel):
+    """Request to Claude AI"""
+    message: str
+    task: str = "chat"
+    model: str = "claude-3-5-sonnet-20241022"
+    system_prompt: Optional[str] = None
+    max_tokens: int = 4096
+    temperature: float = 1.0
+    use_conversation_history: bool = False
+
+
+class ClaudeChatRequest(BaseModel):
+    """Simple chat request"""
+    message: str
+    model: str = "claude-3-5-sonnet-20241022"
+
+
+class ClaudeCodeReviewRequest(BaseModel):
+    """Code review request"""
+    code: str
+    language: str = "python"
+    model: str = "claude-3-5-sonnet-20241022"
+
+
+class ClaudeCodeGenerateRequest(BaseModel):
+    """Code generation request"""
+    requirements: str
+    language: str = "python"
+    model: str = "claude-3-5-sonnet-20241022"
+
+
 # ============== Agent Management ==============
 
 @router.get("/agents")
@@ -45,7 +77,8 @@ async def list_agents():
     """
     agents = [
         health_monitor_agent.get_info(),
-        stock_monitor_agent.get_info()
+        stock_monitor_agent.get_info(),
+        claude_agent.get_info()
     ]
     return {
         "count": len(agents),
@@ -62,6 +95,8 @@ async def get_agent_info(agent_name: str):
         return health_monitor_agent.get_info()
     elif agent_name == "stock-monitor":
         return stock_monitor_agent.get_info()
+    elif agent_name == "claude-assistant":
+        return claude_agent.get_info()
 
     raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
 
@@ -227,3 +262,209 @@ async def quick_stock_check():
     """
     result = await stock_monitor_agent.execute(category="top_tech")
     return result
+
+
+# ============== Claude AI Agent ==============
+
+@router.post("/agents/claude-assistant/run")
+async def run_claude_task(request: ClaudeRequest):
+    """
+    Execute a Claude AI task.
+
+    Available tasks:
+    - chat: General conversation (supports history)
+    - analyze: Analyze and provide insights
+    - summarize: Summarize content
+    - code_review: Review code for issues
+    - code_generate: Generate code from requirements
+    - translate: Translate text
+    - custom: Use custom system prompt
+
+    Models available:
+    - claude-3-5-sonnet-20241022 (recommended, balanced)
+    - claude-3-opus-20240229 (most capable)
+    - claude-3-5-haiku-20241022 (fastest, most economical)
+    """
+    try:
+        result = await claude_agent.execute(
+            message=request.message,
+            task=request.task,
+            model=request.model,
+            system_prompt=request.system_prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            use_conversation_history=request.use_conversation_history
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/claude-assistant/chat")
+async def claude_chat(request: ClaudeChatRequest):
+    """
+    Simple chat with Claude.
+
+    Maintains conversation history automatically.
+    Perfect for interactive conversations.
+    """
+    try:
+        result = await claude_agent.execute(
+            message=request.message,
+            task="chat",
+            model=request.model,
+            use_conversation_history=True
+        )
+        return {
+            "response": result["result"]["response"],
+            "usage": result["result"]["usage"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/claude-assistant/analyze")
+async def claude_analyze(request: ClaudeChatRequest):
+    """
+    Analyze text and provide insights.
+    """
+    try:
+        result = await claude_agent.execute(
+            message=request.message,
+            task="analyze",
+            model=request.model
+        )
+        return {
+            "analysis": result["result"]["response"],
+            "usage": result["result"]["usage"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/claude-assistant/summarize")
+async def claude_summarize(request: ClaudeChatRequest):
+    """
+    Summarize text content.
+    """
+    try:
+        result = await claude_agent.execute(
+            message=request.message,
+            task="summarize",
+            model=request.model
+        )
+        return {
+            "summary": result["result"]["response"],
+            "usage": result["result"]["usage"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/claude-assistant/code/review")
+async def claude_code_review(request: ClaudeCodeReviewRequest):
+    """
+    Review code for bugs, security issues, and best practices.
+    """
+    try:
+        result = await claude_agent.execute(
+            message=f"Review this {request.language} code:\n\n```{request.language}\n{request.code}\n```",
+            task="code_review",
+            model=request.model
+        )
+        return {
+            "review": result["result"]["response"],
+            "usage": result["result"]["usage"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agents/claude-assistant/code/generate")
+async def claude_code_generate(request: ClaudeCodeGenerateRequest):
+    """
+    Generate code based on requirements.
+    """
+    try:
+        result = await claude_agent.execute(
+            message=f"Generate {request.language} code for the following requirements:\n\n{request.requirements}",
+            task="code_generate",
+            model=request.model
+        )
+        return {
+            "code": result["result"]["response"],
+            "usage": result["result"]["usage"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/agents/claude-assistant/status")
+async def get_claude_status():
+    """
+    Get the current status and last result of the Claude agent.
+    """
+    info = claude_agent.get_info()
+    info["last_result"] = claude_agent.last_result
+    return info
+
+
+@router.get("/agents/claude-assistant/history")
+async def get_claude_history():
+    """
+    Get conversation history.
+    """
+    return {
+        "history": claude_agent.get_history()
+    }
+
+
+@router.post("/agents/claude-assistant/history/clear")
+async def clear_claude_history():
+    """
+    Clear conversation history.
+    """
+    claude_agent.clear_history()
+    return {
+        "status": "success",
+        "message": "Conversation history cleared"
+    }
+
+
+@router.get("/agents/claude-assistant/models")
+async def get_available_models():
+    """
+    Get available Claude models.
+    """
+    return {
+        "models": [
+            {
+                "id": ClaudeModel.SONNET.value,
+                "name": "Claude 3.5 Sonnet",
+                "description": "Balanced performance and speed (recommended)",
+                "recommended": True
+            },
+            {
+                "id": ClaudeModel.OPUS.value,
+                "name": "Claude 3 Opus",
+                "description": "Most capable model for complex tasks"
+            },
+            {
+                "id": ClaudeModel.HAIKU.value,
+                "name": "Claude 3.5 Haiku",
+                "description": "Fastest and most economical"
+            }
+        ]
+    }

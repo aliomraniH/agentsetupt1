@@ -29,3 +29,6 @@ typing-extensions==4.8.0
 
 # Stock data
 yfinance==0.2.33
+
+# AI/LLM
+anthropic==0.39.0
