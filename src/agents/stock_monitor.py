@@ -119,87 +119,138 @@ class StockMonitorAgent(BaseAgent):
 
     async def _fetch_with_llm_search(self, symbols: List[str]) -> Dict[str, Any]:
         """
-        Fetch stock data using LLM-powered search (Perplexity).
-        More reliable than web scraping as LLM can understand and extract data from various sources.
+        Fetch stock data using LLM-powered search (Perplexity) with multi-step validation.
+        Uses a 3-step process to ensure accuracy:
+        1. Verify stock symbol and get company name
+        2. Get current price and previous close
+        3. Get volume and calculate changes
         """
-        if AsyncOpenAI is None or not settings.perplexity_api_key:
-            logger.warning("Perplexity API not configured - skipping LLM search")
+        if AsyncOpenAI is None:
+            logger.error("AsyncOpenAI not installed - skipping LLM search")
+            return {symbol: {"symbol": symbol, "error": "AsyncOpenAI not installed", "status": "error"}
+                    for symbol in symbols}
+
+        if not settings.perplexity_api_key:
+            logger.error("Perplexity API key not configured - skipping LLM search")
             return {symbol: {"symbol": symbol, "error": "Perplexity API not configured", "status": "error"}
                     for symbol in symbols}
 
+        logger.info(f"✓ Perplexity API key found: {settings.perplexity_api_key[:15]}...")
         results = {}
 
-        # Initialize Perplexity client (uses OpenAI-compatible API)
-        client = AsyncOpenAI(
-            api_key=settings.perplexity_api_key,
-            base_url="https://api.perplexity.ai"
-        )
+        # Initialize Perplexity client
+        try:
+            client = AsyncOpenAI(
+                api_key=settings.perplexity_api_key,
+                base_url="https://api.perplexity.ai"
+            )
+            logger.info("✓ Perplexity client initialized")
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize Perplexity client: {e}")
+            return {symbol: {"symbol": symbol, "error": f"Client init: {str(e)}", "status": "error"}
+                    for symbol in symbols}
 
         for symbol in symbols:
             try:
-                # Craft a precise prompt for stock data
-                prompt = f"""Get the latest stock data for {symbol}. Return ONLY a JSON object with this exact structure (no markdown, no explanation):
-{{
-  "symbol": "{symbol}",
-  "current_price": <latest price as number>,
-  "previous_close": <previous day close as number>,
-  "change": <price change as number>,
-  "change_percent": <percent change as number>,
-  "volume": <trading volume as integer>,
-  "company_name": "<full company name>"
-}}
+                logger.info(f"→ Fetching {symbol} with multi-step validation...")
 
-Requirements:
-- All prices must be in USD
-- Use the most recent trading data available
-- Return only valid JSON, no additional text
-- Ensure all numeric fields are actual numbers, not strings"""
+                # STEP 1: Verify stock exists and get company name
+                logger.info(f"  Step 1/3: Verifying {symbol} exists...")
+                step1_prompt = f"""Search for stock ticker symbol {symbol}. What is the full company name?
+Reply with ONLY the company name, no other text."""
 
-                response = await client.chat.completions.create(
-                    model="llama-3.1-sonar-small-128k-online",  # Perplexity's fast search model
+                step1_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
                     messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a financial data extraction assistant. Return only valid JSON with stock data, no explanations or markdown."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
+                        {"role": "system", "content": "You are a financial data assistant. Answer precisely and concisely."},
+                        {"role": "user", "content": step1_prompt}
                     ],
-                    temperature=0.0,  # Deterministic output
-                    max_tokens=500
+                    temperature=0.0,
+                    max_tokens=100
                 )
+                company_name = step1_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 1: {symbol} = {company_name}")
 
-                # Parse LLM response
-                content = response.choices[0].message.content.strip()
+                # Validate we got a reasonable company name
+                if len(company_name) < 2 or len(company_name) > 100:
+                    raise ValueError(f"Invalid company name: {company_name}")
 
-                # Remove markdown code blocks if present
-                if content.startswith("```"):
-                    content = content.split("```")[1]
-                    if content.startswith("json"):
-                        content = content[4:]
-                content = content.strip()
+                # STEP 2: Get current price and previous close
+                logger.info(f"  Step 2/3: Getting prices for {symbol}...")
+                step2_prompt = f"""What is the current stock price and previous day's closing price for {symbol} ({company_name})?
+Reply with ONLY two numbers separated by a comma: current_price,previous_close
+Example: 150.25,148.50"""
 
-                # Parse JSON
-                data = json.loads(content)
+                step2_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data assistant. Return only the requested numbers, nothing else."},
+                        {"role": "user", "content": step2_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+                prices_text = step2_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 2: Prices = {prices_text}")
 
-                # Validate and format response
-                current_price = float(data.get("current_price", 0))
-                previous_close = float(data.get("previous_close", 0))
-                change = float(data.get("change", 0))
-                change_percent = float(data.get("change_percent", 0))
-                volume = int(data.get("volume", 0)) if data.get("volume") else None
+                # Parse and validate prices
+                price_parts = prices_text.replace("$", "").replace(" ", "").split(",")
+                if len(price_parts) != 2:
+                    raise ValueError(f"Expected 2 prices, got: {prices_text}")
 
-                # Recalculate if needed
-                if not change and current_price and previous_close:
-                    change = current_price - previous_close
-                if not change_percent and current_price and previous_close:
-                    change_percent = (change / previous_close) * 100
+                current_price = float(price_parts[0])
+                previous_close = float(price_parts[1])
+
+                # Sanity check prices
+                if current_price <= 0 or current_price > 100000:
+                    raise ValueError(f"Invalid current price: ${current_price}")
+                if previous_close <= 0 or previous_close > 100000:
+                    raise ValueError(f"Invalid previous close: ${previous_close}")
+
+                # STEP 3: Get volume
+                logger.info(f"  Step 3/3: Getting volume for {symbol}...")
+                step3_prompt = f"""What is the current trading volume for {symbol} ({company_name}) today?
+Reply with ONLY the volume number, no other text.
+Example: 25000000"""
+
+                step3_response = await client.chat.completions.create(
+                    model="llama-3.1-sonar-small-128k-online",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data assistant. Return only the requested number."},
+                        {"role": "user", "content": step3_prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=50
+                )
+                volume_text = step3_response.choices[0].message.content.strip()
+                logger.info(f"  ✓ Step 3: Volume = {volume_text}")
+
+                # Parse volume - handle various formats (25M, 25000000, 25,000,000)
+                volume_text = volume_text.replace(",", "").replace(" ", "").upper()
+                try:
+                    if "M" in volume_text:
+                        volume = int(float(volume_text.replace("M", "")) * 1_000_000)
+                    elif "B" in volume_text:
+                        volume = int(float(volume_text.replace("B", "")) * 1_000_000_000)
+                    elif "K" in volume_text:
+                        volume = int(float(volume_text.replace("K", "")) * 1_000)
+                    else:
+                        volume = int(float(volume_text))
+                except (ValueError, AttributeError):
+                    logger.warning(f"  Could not parse volume: {volume_text}, using None")
+                    volume = None
+
+                # Calculate changes
+                change = current_price - previous_close
+                change_percent = (change / previous_close) * 100
+
+                # Final validation: Check if price change seems reasonable
+                if abs(change_percent) > 50:
+                    logger.warning(f"  ⚠ Large price change detected: {change_percent:.2f}%")
 
                 results[symbol] = {
                     "symbol": symbol,
-                    "name": data.get("company_name", symbol),
+                    "name": company_name,
                     "current_price": round(current_price, 2),
                     "previous_close": round(previous_close, 2),
                     "change": round(change, 2),
@@ -208,20 +259,20 @@ Requirements:
                     "volume_formatted": self._format_volume(volume) if volume else "N/A",
                     "status": "success"
                 }
-                logger.info(f"Successfully fetched {symbol} via LLM search")
+                logger.info(f"✓ {symbol}: ${current_price} ({change_percent:+.2f}%) via LLM")
 
-            except json.JSONDecodeError as e:
-                logger.error(f"LLM returned invalid JSON for {symbol}: {content[:200]}")
+            except ValueError as e:
+                logger.error(f"✗ {symbol}: Validation error - {e}")
                 results[symbol] = {
                     "symbol": symbol,
-                    "error": f"LLM JSON parse error: {str(e)}",
+                    "error": f"Validation: {str(e)}",
                     "status": "error"
                 }
             except Exception as e:
-                logger.error(f"LLM search error for {symbol}: {e}")
+                logger.error(f"✗ {symbol}: {type(e).__name__}: {e}")
                 results[symbol] = {
                     "symbol": symbol,
-                    "error": f"LLM search error: {str(e)}",
+                    "error": f"{type(e).__name__}: {str(e)}",
                     "status": "error"
                 }
 
