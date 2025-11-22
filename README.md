@@ -51,6 +51,11 @@ python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload
 | `/api/v1/agents/health-monitor/targets` | GET | List monitoring targets |
 | `/api/v1/agents/health-monitor/targets` | POST | Add monitoring target |
 | `/api/v1/agents/health-monitor/targets/{id}` | DELETE | Remove target |
+| `/api/v1/agents/claude-assistant/run` | POST | Execute Claude AI task |
+| `/api/v1/agents/claude-assistant/chat` | POST | Simple chat with Claude |
+| `/api/v1/agents/claude-assistant/analyze` | POST | Analyze text |
+| `/api/v1/agents/claude-assistant/code/review` | POST | Review code |
+| `/api/v1/agents/claude-assistant/code/generate` | POST | Generate code |
 
 ### API Documentation
 
@@ -58,11 +63,11 @@ python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload
 - ReDoc: `/redoc`
 - OpenAPI JSON: `/openapi.json`
 
-## Health Monitor Agent
+## Available Agents
 
-The first agent monitors health of deployment environments.
+### Health Monitor Agent
 
-### Usage
+Monitors health of deployment environments.
 
 **Run a health check:**
 ```bash
@@ -82,9 +87,53 @@ curl -X POST http://localhost:8080/api/v1/agents/health-monitor/targets \
   }'
 ```
 
-**Get health history:**
+### Stock Monitor Agent
+
+Fetches real-time stock market data.
+
+**Quick stock check:**
 ```bash
-curl http://localhost:8080/api/v1/agents/health-monitor/history?limit=10
+curl http://localhost:8080/api/v1/agents/stock-monitor/quick
+```
+
+### Claude AI Agent
+
+AI assistant powered by Anthropic's Claude API.
+
+**Set up API key:**
+```bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+```
+
+**Simple chat:**
+```bash
+curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Explain quantum computing in simple terms"
+  }'
+```
+
+**Code review:**
+```bash
+curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/code/review \
+  -H "Content-Type: application/json" \
+  -d '{
+    "code": "def hello(): print(\"Hello\")",
+    "language": "python"
+  }'
+```
+
+**Full documentation:** See [CLAUDE_AGENT_USAGE.md](./CLAUDE_AGENT_USAGE.md) for detailed usage guide
+
+**Integration Examples:**
+
+```bash
+# Get stock data analysis with Claude
+stocks=$(curl http://localhost:8080/api/v1/agents/stock-monitor/quick)
+curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/analyze \
+  -H "Content-Type: application/json" \
+  -d "{\"message\": \"Analyze this stock data: $stocks\"}"
 ```
 
 ## GitHub Actions
@@ -119,7 +168,9 @@ agentsetupt1/
 │   │   └── agents.py       # Agent management routes
 │   └── agents/             # Agent implementations
 │       ├── base.py         # Base agent class
-│       └── health_monitor.py # Health Monitor Agent
+│       ├── health_monitor.py # Health Monitor Agent
+│       ├── stock_monitor.py  # Stock Monitor Agent
+│       └── claude_agent.py   # Claude AI Agent
 ├── tests/                  # Test files
 ├── .replit                 # Replit configuration
 ├── replit.nix              # Nix dependencies

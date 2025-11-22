@@ -1,5 +1,5 @@
 # Web Framework
-fastapi==0.104.1
+fastapi==0.115.0
 uvicorn[standard]==0.24.0
 
 # HTTP Client for health checks
@@ -7,7 +7,7 @@ httpx==0.25.2
 aiohttp==3.9.1
 
 # Data validation
-pydantic==2.5.2
+pydantic==2.9.0
 pydantic-settings==2.1.0
 
 # Utilities
@@ -24,8 +24,14 @@ loguru==0.7.2
 pytest==7.4.3
 pytest-asyncio==0.21.1
 
-# Type hints
-typing-extensions==4.8.0
+# Type hints - upgraded for openai compatibility
+typing-extensions>=4.11,<5.0
 
 # Stock data
 yfinance==0.2.33
+beautifulsoup4==4.12.2
+lxml==5.1.0
+
+# LLM APIs for intelligent data fetching and analysis
+openai==1.54.0  # For Perplexity API compatibility
+anthropic==0.39.0  # For Claude API
