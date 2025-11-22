@@ -5,6 +5,7 @@ Configuration management for the application
 from pydantic_settings import BaseSettings
 from typing import Optional
 from functools import lru_cache
+import os
 
 
 class Settings(BaseSettings):
@@ -37,7 +38,32 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-        case_sensitive = False
+        case_sensitive = True  # Changed to True for Replit secrets compatibility
+
+    def __init__(self, **kwargs):
+        """Custom init to handle Replit environment variables"""
+        super().__init__(**kwargs)
+
+        # Fallback: Manually check environment variables if pydantic didn't load them
+        # This handles cases where Replit secrets aren't picked up by pydantic
+
+        if not self.anthropic_api_key:
+            # Try exact match first
+            env_key = os.environ.get("ANTHROPIC_API_KEY")
+            if env_key and env_key.strip():  # Check it's not empty/whitespace
+                self.anthropic_api_key = env_key.strip()
+                print(f"✅ Loaded ANTHROPIC_API_KEY from environment (fallback): {env_key[:20]}...")
+
+        if not self.alpha_vantage_api_key:
+            env_key = os.environ.get("ALPHA_VANTAGE_API_KEY")
+            if env_key and env_key.strip():
+                self.alpha_vantage_api_key = env_key.strip()
+
+        if not self.perplexity_api_key:
+            env_key = os.environ.get("PERPLEXITY_API_KEY")
+            if env_key and env_key.strip():
+                self.perplexity_api_key = env_key.strip()
+
 
 
 @lru_cache()

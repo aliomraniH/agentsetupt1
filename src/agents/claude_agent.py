@@ -80,7 +80,20 @@ class ClaudeAgent(BaseAgent):
             raise RuntimeError("anthropic package not installed. Install with: pip install anthropic")
 
         if not settings.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY not configured. Set it in environment variables or .env file")
+            import os
+            # Try one more time to get directly from environment
+            direct_key = os.environ.get("ANTHROPIC_API_KEY")
+            if direct_key:
+                # Use the direct key if found
+                self._client = AsyncAnthropic(api_key=direct_key)
+                return self._client
+            else:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY not configured. "
+                    "Please add it to Replit Secrets (not .env file). "
+                    "Key name must be exactly: ANTHROPIC_API_KEY (case-sensitive). "
+                    "Get your key from: https://console.anthropic.com/settings/keys"
+                )
 
         if self._client is None:
             self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)

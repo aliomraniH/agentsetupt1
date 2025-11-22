@@ -98,6 +98,44 @@ async def list_agents():
     }
 
 
+@router.get("/agents/debug-keys")
+async def debug_api_keys():
+    """
+    Debug endpoint to check API key configuration.
+
+    Verifies that API keys are correctly loaded from Replit Secrets.
+    Shows which keys are present in environment vs loaded into settings.
+    """
+    import os
+
+    # Check environment variables directly
+    env_anthropic = os.environ.get("ANTHROPIC_API_KEY")
+    env_alpha = os.environ.get("ALPHA_VANTAGE_API_KEY")
+    env_perplexity = os.environ.get("PERPLEXITY_API_KEY")
+
+    return {
+        "environment_variables": {
+            "ANTHROPIC_API_KEY": "✅ Present" if env_anthropic else "❌ Not found",
+            "ALPHA_VANTAGE_API_KEY": "✅ Present" if env_alpha else "❌ Not found",
+            "PERPLEXITY_API_KEY": "✅ Present" if env_perplexity else "❌ Not found"
+        },
+        "settings_loaded": {
+            "anthropic_api_key": "✅ Loaded" if settings.anthropic_api_key else "❌ Not loaded",
+            "alpha_vantage_api_key": "✅ Loaded" if settings.alpha_vantage_api_key else "❌ Not loaded",
+            "perplexity_api_key": "✅ Loaded" if settings.perplexity_api_key else "❌ Not loaded"
+        },
+        "key_previews": {
+            "anthropic": f"{settings.anthropic_api_key[:15]}...{settings.anthropic_api_key[-4:]}" if settings.anthropic_api_key and len(settings.anthropic_api_key) > 20 else "N/A",
+            "alpha_vantage": f"{settings.alpha_vantage_api_key[:10]}...{settings.alpha_vantage_api_key[-4:]}" if settings.alpha_vantage_api_key and len(settings.alpha_vantage_api_key) > 15 else "N/A",
+            "perplexity": f"{settings.perplexity_api_key[:15]}...{settings.perplexity_api_key[-4:]}" if settings.perplexity_api_key and len(settings.perplexity_api_key) > 20 else "N/A"
+        },
+        "config": {
+            "case_sensitive": "True (required for Replit Secrets)",
+            "env_file": ".env"
+        }
+    }
+
+
 # ============== LLM API Test Endpoint (Must be before {agent_name} route) ==============
 
 @router.get("/agents/llm-test")
@@ -110,9 +148,20 @@ async def test_llm_api():
     - API is responding to requests
     - Responses are accurate
     """
+    import os
+
     logger.info("="*80)
     logger.info("🧪 CLAUDE API TEST - Starting verification")
     logger.info("="*80)
+
+    # Direct environment check (bypass pydantic)
+    direct_env_key = os.environ.get("ANTHROPIC_API_KEY")
+    logger.info(f"🔍 Direct environment check: {'✅ Found' if direct_env_key else '❌ Not found'}")
+    if direct_env_key:
+        logger.info(f"   Key preview: {direct_env_key[:20]}...")
+
+    # Check settings (pydantic-loaded)
+    logger.info(f"🔍 Settings check: {'✅ Loaded' if settings.anthropic_api_key else '❌ Not loaded'}")
 
     # Check API key
     if not settings.anthropic_api_key:
