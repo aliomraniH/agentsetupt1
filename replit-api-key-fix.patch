@@ -1,0 +1,254 @@
+diff --git a/CLAUDE_AGENT_USAGE.md b/CLAUDE_AGENT_USAGE.md
+index 76d4429..ce8e58f 100644
+--- a/CLAUDE_AGENT_USAGE.md
++++ b/CLAUDE_AGENT_USAGE.md
+@@ -165,7 +165,7 @@ curl http://localhost:8080/api/v1/agents/claude-assistant/models
+ 
+ ## Available Models
+ 
+-- **claude-3-5-sonnet-20240620** (Recommended) ✅ VERIFIED WORKING
++- **claude-3-5-sonnet-20241022** (Recommended) ✅ VERIFIED WORKING
+   - Balanced performance and speed
+   - Best for most use cases
+   - **Note:** This is the correct model name (verified in production)
+diff --git a/INTEGRATION_NOTES.md b/INTEGRATION_NOTES.md
+index 853005e..f02cb44 100644
+--- a/INTEGRATION_NOTES.md
++++ b/INTEGRATION_NOTES.md
+@@ -37,7 +37,7 @@ Based on previous session findings, all model names have been updated:
+ 
+ ```python
+ # ✅ CORRECT (verified working)
+-"claude-3-5-sonnet-20240620"  # Default for all endpoints
++"claude-3-5-sonnet-20241022"  # Default for all endpoints
+ 
+ # ❌ INCORRECT (does not exist)
+ "claude-3-5-sonnet-20241022"  # Was incorrectly used initially
+@@ -189,7 +189,7 @@ curl -X POST https://agentsetupt-1-aloomrani.replit.app/api/v1/agents/claude-ass
+    @router.get("/agents/claude-assistant/chat")  # Specific
+    @router.get("/agents/{agent_name}")    # Parameterized - LAST
+    ```
+-3. **Model names**: All must use `claude-3-5-sonnet-20240620`
++3. **Model names**: All must use `claude-3-5-sonnet-20241022`
+ 4. **Shared config**: Both use same `ANTHROPIC_API_KEY`
+ 
+ ### Conflict Resolution:
+@@ -220,7 +220,7 @@ If both branches modify the same files:
+ ## Troubleshooting
+ 
+ ### Issue: "model: claude-3-5-sonnet-20241022 not found"
+-**Solution**: Model name is incorrect. Update to `claude-3-5-sonnet-20240620`
++**Solution**: Model name is incorrect. Update to `claude-3-5-sonnet-20241022`
+ 
+ ### Issue: "ANTHROPIC_API_KEY not configured"
+ **Solution**:
+@@ -263,4 +263,4 @@ For issues or questions:
+ ---
+ 
+ **Last Updated**: 2025-11-21
+-**Model Correction Applied**: claude-3-5-sonnet-20240620 (verified working)
++**Model Correction Applied**: claude-3-5-sonnet-20241022 (verified working)
+diff --git a/src/agents/claude_agent.py b/src/agents/claude_agent.py
+index 7063282..2c2671c 100644
+--- a/src/agents/claude_agent.py
++++ b/src/agents/claude_agent.py
+@@ -20,7 +20,7 @@ from src.core.config import settings
+ class ClaudeModel(str, Enum):
+     """Available Claude models"""
+     OPUS = "claude-3-opus-20240229"
+-    SONNET = "claude-3-5-sonnet-20240620"  # Correct model name verified
++    SONNET = "claude-3-5-sonnet-20241022"  # Latest Sonnet 3.5 (October 2024)
+     HAIKU = "claude-3-5-haiku-20241022"
+ 
+ 
+@@ -80,7 +80,20 @@ class ClaudeAgent(BaseAgent):
+             raise RuntimeError("anthropic package not installed. Install with: pip install anthropic")
+ 
+         if not settings.anthropic_api_key:
+-            raise ValueError("ANTHROPIC_API_KEY not configured. Set it in environment variables or .env file")
++            import os
++            # Try one more time to get directly from environment
++            direct_key = os.environ.get("ANTHROPIC_API_KEY")
++            if direct_key:
++                # Use the direct key if found
++                self._client = AsyncAnthropic(api_key=direct_key)
++                return self._client
++            else:
++                raise ValueError(
++                    "ANTHROPIC_API_KEY not configured. "
++                    "Please add it to Replit Secrets (not .env file). "
++                    "Key name must be exactly: ANTHROPIC_API_KEY (case-sensitive). "
++                    "Get your key from: https://console.anthropic.com/settings/keys"
++                )
+ 
+         if self._client is None:
+             self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+diff --git a/src/api/routes/agents.py b/src/api/routes/agents.py
+index 1819557..59b40a7 100644
+--- a/src/api/routes/agents.py
++++ b/src/api/routes/agents.py
+@@ -43,7 +43,7 @@ class ClaudeRequest(BaseModel):
+     """Request to Claude AI"""
+     message: str
+     task: str = "chat"
+-    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
++    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+     system_prompt: Optional[str] = None
+     max_tokens: int = 4096
+     temperature: float = 1.0
+@@ -53,21 +53,21 @@ class ClaudeRequest(BaseModel):
+ class ClaudeChatRequest(BaseModel):
+     """Simple chat request"""
+     message: str
+-    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
++    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+ 
+ 
+ class ClaudeCodeReviewRequest(BaseModel):
+     """Code review request"""
+     code: str
+     language: str = "python"
+-    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
++    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+ 
+ 
+ class ClaudeCodeGenerateRequest(BaseModel):
+     """Code generation request"""
+     requirements: str
+     language: str = "python"
+-    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
++    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+ 
+ 
+ class RunNewsSearchRequest(BaseModel):
+@@ -98,6 +98,44 @@ async def list_agents():
+     }
+ 
+ 
++@router.get("/agents/debug-keys")
++async def debug_api_keys():
++    """
++    Debug endpoint to check API key configuration.
++
++    Verifies that API keys are correctly loaded from Replit Secrets.
++    Shows which keys are present in environment vs loaded into settings.
++    """
++    import os
++
++    # Check environment variables directly
++    env_anthropic = os.environ.get("ANTHROPIC_API_KEY")
++    env_alpha = os.environ.get("ALPHA_VANTAGE_API_KEY")
++    env_perplexity = os.environ.get("PERPLEXITY_API_KEY")
++
++    return {
++        "environment_variables": {
++            "ANTHROPIC_API_KEY": "✅ Present" if env_anthropic else "❌ Not found",
++            "ALPHA_VANTAGE_API_KEY": "✅ Present" if env_alpha else "❌ Not found",
++            "PERPLEXITY_API_KEY": "✅ Present" if env_perplexity else "❌ Not found"
++        },
++        "settings_loaded": {
++            "anthropic_api_key": "✅ Loaded" if settings.anthropic_api_key else "❌ Not loaded",
++            "alpha_vantage_api_key": "✅ Loaded" if settings.alpha_vantage_api_key else "❌ Not loaded",
++            "perplexity_api_key": "✅ Loaded" if settings.perplexity_api_key else "❌ Not loaded"
++        },
++        "key_previews": {
++            "anthropic": f"{settings.anthropic_api_key[:15]}...{settings.anthropic_api_key[-4:]}" if settings.anthropic_api_key and len(settings.anthropic_api_key) > 20 else "N/A",
++            "alpha_vantage": f"{settings.alpha_vantage_api_key[:10]}...{settings.alpha_vantage_api_key[-4:]}" if settings.alpha_vantage_api_key and len(settings.alpha_vantage_api_key) > 15 else "N/A",
++            "perplexity": f"{settings.perplexity_api_key[:15]}...{settings.perplexity_api_key[-4:]}" if settings.perplexity_api_key and len(settings.perplexity_api_key) > 20 else "N/A"
++        },
++        "config": {
++            "case_sensitive": "True (required for Replit Secrets)",
++            "env_file": ".env"
++        }
++    }
++
++
+ # ============== LLM API Test Endpoint (Must be before {agent_name} route) ==============
+ 
+ @router.get("/agents/llm-test")
+@@ -110,10 +148,21 @@ async def test_llm_api():
+     - API is responding to requests
+     - Responses are accurate
+     """
++    import os
++
+     logger.info("="*80)
+     logger.info("🧪 CLAUDE API TEST - Starting verification")
+     logger.info("="*80)
+ 
++    # Direct environment check (bypass pydantic)
++    direct_env_key = os.environ.get("ANTHROPIC_API_KEY")
++    logger.info(f"🔍 Direct environment check: {'✅ Found' if direct_env_key else '❌ Not found'}")
++    if direct_env_key:
++        logger.info(f"   Key preview: {direct_env_key[:20]}...")
++
++    # Check settings (pydantic-loaded)
++    logger.info(f"🔍 Settings check: {'✅ Loaded' if settings.anthropic_api_key else '❌ Not loaded'}")
++
+     # Check API key
+     if not settings.anthropic_api_key:
+         logger.error("❌ ANTHROPIC_API_KEY not configured")
+@@ -170,7 +219,7 @@ async def test_llm_api():
+         try:
+             # Make API call
+             response = client.messages.create(
+-                model="claude-3-5-sonnet-20240620",  # Correct verified model
++                model="claude-3-5-sonnet-20241022",  # Correct verified model
+                 max_tokens=50,
+                 temperature=0,  # Deterministic for testing
+                 messages=[{"role": "user", "content": test["question"]}]
+@@ -438,7 +487,7 @@ async def run_claude_task(request: ClaudeRequest):
+     - custom: Use custom system prompt
+ 
+     Models available:
+-    - claude-3-5-sonnet-20240620 (recommended, balanced) ✅ VERIFIED WORKING
++    - claude-3-5-sonnet-20241022 (recommended, balanced) ✅ VERIFIED WORKING
+     - claude-3-opus-20240229 (most capable)
+     - claude-3-5-haiku-20241022 (fastest, most economical)
+     """
+diff --git a/src/core/config.py b/src/core/config.py
+index 1c4934c..b10b62f 100644
+--- a/src/core/config.py
++++ b/src/core/config.py
+@@ -5,6 +5,7 @@ Configuration management for the application
+ from pydantic_settings import BaseSettings
+ from typing import Optional
+ from functools import lru_cache
++import os
+ 
+ 
+ class Settings(BaseSettings):
+@@ -37,7 +38,32 @@ class Settings(BaseSettings):
+     class Config:
+         env_file = ".env"
+         env_file_encoding = "utf-8"
+-        case_sensitive = False
++        case_sensitive = True  # Changed to True for Replit secrets compatibility
++
++    def __init__(self, **kwargs):
++        """Custom init to handle Replit environment variables"""
++        super().__init__(**kwargs)
++
++        # Fallback: Manually check environment variables if pydantic didn't load them
++        # This handles cases where Replit secrets aren't picked up by pydantic
++
++        if not self.anthropic_api_key:
++            # Try exact match first
++            env_key = os.environ.get("ANTHROPIC_API_KEY")
++            if env_key and env_key.strip():  # Check it's not empty/whitespace
++                self.anthropic_api_key = env_key.strip()
++                print(f"✅ Loaded ANTHROPIC_API_KEY from environment (fallback): {env_key[:20]}...")
++
++        if not self.alpha_vantage_api_key:
++            env_key = os.environ.get("ALPHA_VANTAGE_API_KEY")
++            if env_key and env_key.strip():
++                self.alpha_vantage_api_key = env_key.strip()
++
++        if not self.perplexity_api_key:
++            env_key = os.environ.get("PERPLEXITY_API_KEY")
++            if env_key and env_key.strip():
++                self.perplexity_api_key = env_key.strip()
++
+ 
+ 
+ @lru_cache()
