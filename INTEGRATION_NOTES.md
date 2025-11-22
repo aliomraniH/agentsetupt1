@@ -37,7 +37,7 @@ Based on previous session findings, all model names have been updated:
 
 ```python
 # ✅ CORRECT (verified working)
-"claude-3-5-sonnet-20240620"  # Default for all endpoints
+"claude-3-5-sonnet-20241022"  # Default for all endpoints
 
 # ❌ INCORRECT (does not exist)
 "claude-3-5-sonnet-20241022"  # Was incorrectly used initially
@@ -189,7 +189,7 @@ curl -X POST https://agentsetupt-1-aloomrani.replit.app/api/v1/agents/claude-ass
    @router.get("/agents/claude-assistant/chat")  # Specific
    @router.get("/agents/{agent_name}")    # Parameterized - LAST
    ```
-3. **Model names**: All must use `claude-3-5-sonnet-20240620`
+3. **Model names**: All must use `claude-3-5-sonnet-20241022`
 4. **Shared config**: Both use same `ANTHROPIC_API_KEY`
 
 ### Conflict Resolution:
@@ -220,7 +220,7 @@ If both branches modify the same files:
 ## Troubleshooting
 
 ### Issue: "model: claude-3-5-sonnet-20241022 not found"
-**Solution**: Model name is incorrect. Update to `claude-3-5-sonnet-20240620`
+**Solution**: Model name is incorrect. Update to `claude-3-5-sonnet-20241022`
 
 ### Issue: "ANTHROPIC_API_KEY not configured"
 **Solution**:
@@ -263,4 +263,4 @@ For issues or questions:
 ---
 
 **Last Updated**: 2025-11-21
-**Model Correction Applied**: claude-3-5-sonnet-20240620 (verified working)
+**Model Correction Applied**: claude-3-5-sonnet-20241022 (verified working)
