@@ -18,16 +18,15 @@ from src.core.config import settings
 
 
 class ClaudeModel(str, Enum):
-    """Available Claude models - Latest versions (Jan 2025)"""
-    # Sonnet models (best balance of intelligence and speed)
-    SONNET_V2 = "claude-3-5-sonnet-20241022"  # Latest Sonnet v2 (Oct 2024) - Most capable
-    SONNET = "claude-3-5-sonnet-20240620"  # Sonnet v1 (June 2024) - Fallback
+    """Available Claude models - Claude 4.5 Family (November 2025)"""
+    # Claude 4.5 Family (Latest - Nov 2025)
+    SONNET_4_5 = "claude-sonnet-4-5-20250929"  # Claude Sonnet 4.5 (Sept 2025) - Recommended default
+    HAIKU_4_5 = "claude-haiku-4-5-20251001"  # Claude Haiku 4.5 (Oct 2025) - Fastest & economical
+    OPUS_4_5 = "claude-opus-4-5-20251101"  # Claude Opus 4.5 (Nov 2025) - Most powerful
 
-    # Haiku (fastest and most economical)
-    HAIKU = "claude-3-5-haiku-20241022"  # Latest Haiku (Oct 2024)
-
-    # Opus (maximum intelligence, higher cost)
-    OPUS = "claude-3-opus-20240229"  # Opus (Feb 2024)
+    # Claude 3.5 Family (Deprecated Nov 10, 2025 - kept for backward compatibility)
+    SONNET_3_5_V2 = "claude-3-5-sonnet-20241022"  # Claude 3.5 Sonnet v2 (Oct 2024) - Fallback
+    SONNET_3_5 = "claude-3-5-sonnet-20240620"  # Claude 3.5 Sonnet v1 (June 2024) - Legacy fallback
 
 
 class ClaudeTask(str, Enum):
@@ -154,13 +153,21 @@ class ClaudeAgent(BaseAgent):
             "content": message
         })
 
-        # Try the requested model first, with fallback for newer models
+        # Try the requested model first, with intelligent fallback for newer models
         models_to_try = [model]
 
-        # If trying the latest Sonnet v2, add fallback to v1
-        if model == ClaudeModel.SONNET_V2.value:
-            models_to_try.append(ClaudeModel.SONNET.value)
-            logger.info(f"[{self.name}] Attempting latest model {model} with fallback")
+        # Fallback chain for Claude 4.5 Sonnet
+        if model == ClaudeModel.SONNET_4_5.value:
+            models_to_try.extend([
+                ClaudeModel.SONNET_3_5_V2.value,  # Fallback to 3.5 v2
+                ClaudeModel.SONNET_3_5.value      # Final fallback to 3.5 v1
+            ])
+            logger.info(f"[{self.name}] Attempting Claude 4.5 with fallback chain to 3.5")
+
+        # Fallback for Claude 3.5 Sonnet v2 (deprecated but still supported)
+        elif model == ClaudeModel.SONNET_3_5_V2.value:
+            models_to_try.append(ClaudeModel.SONNET_3_5.value)
+            logger.info(f"[{self.name}] Attempting Claude 3.5 v2 with fallback to v1")
 
         last_error = None
         for attempt_model in models_to_try:
@@ -217,7 +224,7 @@ class ClaudeAgent(BaseAgent):
         self,
         message: str,
         task: str = "chat",
-        model: str = ClaudeModel.SONNET_V2.value,  # Use latest model by default
+        model: str = ClaudeModel.SONNET_4_5.value,  # Use Claude 4.5 by default (Nov 2025)
         system_prompt: Optional[str] = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,

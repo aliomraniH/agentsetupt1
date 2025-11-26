@@ -43,7 +43,7 @@ class ClaudeRequest(BaseModel):
     """Request to Claude AI"""
     message: str
     task: str = "chat"
-    model: str = "claude-3-5-sonnet-20241022"  # Latest Claude 3.5 Sonnet v2 (with auto-fallback)
+    model: str = "claude-sonnet-4-5-20250929"  # Claude 4.5 Sonnet (Nov 2025) with auto-fallback
     system_prompt: Optional[str] = None
     max_tokens: int = 4096
     temperature: float = 1.0
@@ -53,21 +53,21 @@ class ClaudeRequest(BaseModel):
 class ClaudeChatRequest(BaseModel):
     """Simple chat request"""
     message: str
-    model: str = "claude-3-5-sonnet-20241022"  # Latest Claude 3.5 Sonnet v2 (with auto-fallback)
+    model: str = "claude-sonnet-4-5-20250929"  # Claude 4.5 Sonnet (Nov 2025) with auto-fallback
 
 
 class ClaudeCodeReviewRequest(BaseModel):
     """Code review request"""
     code: str
     language: str = "python"
-    model: str = "claude-3-5-sonnet-20241022"  # Latest Claude 3.5 Sonnet v2 (with auto-fallback)
+    model: str = "claude-sonnet-4-5-20250929"  # Claude 4.5 Sonnet (Nov 2025) with auto-fallback
 
 
 class ClaudeCodeGenerateRequest(BaseModel):
     """Code generation request"""
     requirements: str
     language: str = "python"
-    model: str = "claude-3-5-sonnet-20241022"  # Latest Claude 3.5 Sonnet v2 (with auto-fallback)
+    model: str = "claude-sonnet-4-5-20250929"  # Claude 4.5 Sonnet (Nov 2025) with auto-fallback
 
 
 class RunNewsSearchRequest(BaseModel):
@@ -219,7 +219,7 @@ async def test_llm_api():
         try:
             # Make API call
             response = client.messages.create(
-                model="claude-3-5-sonnet-20241022",  # Latest Sonnet v2 (with auto-fallback to v1)
+                model="claude-sonnet-4-5-20250929",  # Claude 4.5 Sonnet (auto-fallback to 3.5)
                 max_tokens=50,
                 temperature=0,  # Deterministic for testing
                 messages=[{"role": "user", "content": test["question"]}]
@@ -486,11 +486,14 @@ async def run_claude_task(request: ClaudeRequest):
     - translate: Translate text
     - custom: Use custom system prompt
 
-    Models available:
-    - claude-3-5-sonnet-20241022 (recommended, latest v2 with auto-fallback) ✅ DEFAULT
-    - claude-3-5-sonnet-20240620 (stable v1 fallback)
-    - claude-3-opus-20240229 (most capable)
-    - claude-3-5-haiku-20241022 (fastest, most economical)
+    Models available (Claude 4.5 Family - November 2025):
+    - claude-sonnet-4-5-20250929 (recommended, latest Sonnet with auto-fallback) ✅ DEFAULT
+    - claude-haiku-4-5-20251001 (fastest & most economical)
+    - claude-opus-4-5-20251101 (most powerful, highest capability)
+
+    Legacy models (deprecated Nov 10, 2025 - auto-fallback only):
+    - claude-3-5-sonnet-20241022 (Sonnet 3.5 v2)
+    - claude-3-5-sonnet-20240620 (Sonnet 3.5 v1)
     """
     try:
         result = await claude_agent.execute(
