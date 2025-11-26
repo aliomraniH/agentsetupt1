@@ -34,4 +34,4 @@ lxml==5.1.0
 
 # LLM APIs for intelligent data fetching and analysis
 openai==1.54.0  # For Perplexity API compatibility
-anthropic==0.39.0  # For Claude API
+anthropic>=0.40.0  # For Claude API - latest version with newest models

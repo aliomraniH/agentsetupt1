@@ -18,10 +18,16 @@ from src.core.config import settings
 
 
 class ClaudeModel(str, Enum):
-    """Available Claude models"""
-    OPUS = "claude-3-opus-20240229"
-    SONNET = "claude-3-5-sonnet-20240620"  # Claude 3.5 Sonnet (June 2024)
-    HAIKU = "claude-3-5-haiku-20241022"
+    """Available Claude models - Latest versions (Jan 2025)"""
+    # Sonnet models (best balance of intelligence and speed)
+    SONNET_V2 = "claude-3-5-sonnet-20241022"  # Latest Sonnet v2 (Oct 2024) - Most capable
+    SONNET = "claude-3-5-sonnet-20240620"  # Sonnet v1 (June 2024) - Fallback
+
+    # Haiku (fastest and most economical)
+    HAIKU = "claude-3-5-haiku-20241022"  # Latest Haiku (Oct 2024)
+
+    # Opus (maximum intelligence, higher cost)
+    OPUS = "claude-3-opus-20240229"  # Opus (Feb 2024)
 
 
 class ClaudeTask(str, Enum):
@@ -135,7 +141,7 @@ class ClaudeAgent(BaseAgent):
         temperature: float,
         use_history: bool
     ) -> Dict[str, Any]:
-        """Make API call to Claude"""
+        """Make API call to Claude with automatic fallback for newer models"""
         client = self._get_client()
 
         # Prepare messages
@@ -148,40 +154,70 @@ class ClaudeAgent(BaseAgent):
             "content": message
         })
 
-        # Make API call
-        response = await client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            messages=messages
-        )
+        # Try the requested model first, with fallback for newer models
+        models_to_try = [model]
 
-        # Extract response
-        assistant_message = response.content[0].text
+        # If trying the latest Sonnet v2, add fallback to v1
+        if model == ClaudeModel.SONNET_V2.value:
+            models_to_try.append(ClaudeModel.SONNET.value)
+            logger.info(f"[{self.name}] Attempting latest model {model} with fallback")
 
-        # Update history if enabled
-        if use_history:
-            self._add_to_history("user", message)
-            self._add_to_history("assistant", assistant_message)
+        last_error = None
+        for attempt_model in models_to_try:
+            try:
+                # Make API call
+                response = await client.messages.create(
+                    model=attempt_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system,
+                    messages=messages
+                )
 
-        return {
-            "response": assistant_message,
-            "model": model,
-            "usage": {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.input_tokens + response.usage.output_tokens
-            },
-            "stop_reason": response.stop_reason,
-            "history_length": len(self._conversation_history)
-        }
+                # Extract response
+                assistant_message = response.content[0].text
+
+                # Update history if enabled
+                if use_history:
+                    self._add_to_history("user", message)
+                    self._add_to_history("assistant", assistant_message)
+
+                # Log if we used a fallback model
+                if attempt_model != model:
+                    logger.warning(f"[{self.name}] Used fallback model {attempt_model} instead of {model}")
+
+                return {
+                    "response": assistant_message,
+                    "model": attempt_model,  # Return actual model used
+                    "requested_model": model,  # Also return requested model
+                    "usage": {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                        "total_tokens": response.usage.input_tokens + response.usage.output_tokens
+                    },
+                    "stop_reason": response.stop_reason,
+                    "history_length": len(self._conversation_history)
+                }
+
+            except Exception as e:
+                error_str = str(e)
+                # Check if it's a 404/not_found error
+                if "404" in error_str or "not_found" in error_str.lower():
+                    logger.warning(f"[{self.name}] Model {attempt_model} not available (404), trying fallback...")
+                    last_error = e
+                    continue
+                else:
+                    # For other errors, raise immediately
+                    raise
+
+        # If we get here, all models failed
+        raise last_error if last_error else Exception("All model attempts failed")
 
     async def run(
         self,
         message: str,
         task: str = "chat",
-        model: str = ClaudeModel.SONNET.value,
+        model: str = ClaudeModel.SONNET_V2.value,  # Use latest model by default
         system_prompt: Optional[str] = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
