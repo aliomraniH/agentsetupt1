@@ -1166,10 +1166,24 @@ Example: 25000000"""
         # Check if using demo data
         is_demo = any(s.get("is_demo", False) for s in successful)
 
+        # Check market hours (US markets: 9:30 AM - 4:00 PM ET, Mon-Fri)
+        now_utc = datetime.now(timezone.utc)
+        # Convert to US/Eastern time (approximate)
+        et_offset = timedelta(hours=-5)  # EST (adjust for DST if needed)
+        now_et = now_utc + et_offset
+        is_weekend = now_et.weekday() >= 5  # Saturday=5, Sunday=6
+        market_hour = now_et.hour + now_et.minute / 60
+        is_market_hours = not is_weekend and 9.5 <= market_hour <= 16.0
+
         result = {
             "list_name": list_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "is_demo_data": is_demo,
+            "market_status": {
+                "is_market_hours": is_market_hours,
+                "is_weekend": is_weekend,
+                "note": "Data may be delayed when markets are closed" if not is_market_hours else "Market is open"
+            },
             "summary": {
                 "total_stocks": len(stock_symbols),
                 "successful": len(successful),
