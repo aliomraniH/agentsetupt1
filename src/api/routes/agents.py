@@ -43,7 +43,7 @@ class ClaudeRequest(BaseModel):
     """Request to Claude AI"""
     message: str
     task: str = "chat"
-    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
     system_prompt: Optional[str] = None
     max_tokens: int = 4096
     temperature: float = 1.0
@@ -53,21 +53,21 @@ class ClaudeRequest(BaseModel):
 class ClaudeChatRequest(BaseModel):
     """Simple chat request"""
     message: str
-    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
 
 
 class ClaudeCodeReviewRequest(BaseModel):
     """Code review request"""
     code: str
     language: str = "python"
-    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
 
 
 class ClaudeCodeGenerateRequest(BaseModel):
     """Code generation request"""
     requirements: str
     language: str = "python"
-    model: str = "claude-3-5-sonnet-20241022"  # Verified working model
+    model: str = "claude-3-5-sonnet-20240620"  # Verified working model
 
 
 class RunNewsSearchRequest(BaseModel):
@@ -219,7 +219,7 @@ async def test_llm_api():
         try:
             # Make API call
             response = client.messages.create(
-                model="claude-3-5-sonnet-20241022",  # Correct verified model
+                model="claude-3-5-sonnet-20240620",  # Correct verified model
                 max_tokens=50,
                 temperature=0,  # Deterministic for testing
                 messages=[{"role": "user", "content": test["question"]}]
@@ -487,7 +487,7 @@ async def run_claude_task(request: ClaudeRequest):
     - custom: Use custom system prompt
 
     Models available:
-    - claude-3-5-sonnet-20241022 (recommended, balanced) ✅ VERIFIED WORKING
+    - claude-3-5-sonnet-20240620 (recommended, balanced) ✅ VERIFIED WORKING
     - claude-3-opus-20240229 (most capable)
     - claude-3-5-haiku-20241022 (fastest, most economical)
     """

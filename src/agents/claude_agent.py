@@ -20,7 +20,7 @@ from src.core.config import settings
 class ClaudeModel(str, Enum):
     """Available Claude models"""
     OPUS = "claude-3-opus-20240229"
-    SONNET = "claude-3-5-sonnet-20241022"  # Latest Sonnet 3.5 (October 2024)
+    SONNET = "claude-3-5-sonnet-20240620"  # Claude 3.5 Sonnet (June 2024)
     HAIKU = "claude-3-5-haiku-20241022"
 
 
