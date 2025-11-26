@@ -48,13 +48,24 @@ app = FastAPI(
 # Configure CORS - Allow all origins for API access
 # Note: When allow_credentials=True, browsers require specific origins (not wildcard)
 # For public API access from Claude artifacts and other sources, we use wildcard without credentials
+# Enhanced configuration for Replit artifacts and cross-origin requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins including Claude artifacts
+    allow_origins=["*"],  # Allows all origins including Claude artifacts and Replit embeds
     allow_credentials=False,  # Must be False when using wildcard origins
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=["*"],  # Expose all response headers to the browser
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],  # Explicit methods including OPTIONS for preflight
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],  # Common headers for cross-origin requests
+    expose_headers=["Content-Length", "Content-Type", "X-Request-ID"],  # Headers accessible to the browser
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 
