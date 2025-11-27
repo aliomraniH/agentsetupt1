@@ -57,6 +57,38 @@ python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload
 | `/api/v1/agents/claude-assistant/code/review` | POST | Review code |
 | `/api/v1/agents/claude-assistant/code/generate` | POST | Generate code |
 
+### Cached Data (Optimized for Third-Party Access)
+
+**NEW: Ultra-fast cached stock endpoints** - No external API calls, instant responses!
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/cached/stocks` | GET | Get all cached stocks |
+| `/api/v1/cached/stocks/{symbol}` | GET | Get single stock from cache |
+| `/api/v1/cached/stocks/batch` | GET | Get multiple stocks (query params) |
+| `/api/v1/cached/lists` | GET | Get available stock lists |
+| `/api/v1/cached/lists/{list_name}` | GET | Get all stocks from a specific list |
+| `/api/v1/cached/stats` | GET | Get cache statistics |
+| `/api/v1/cached/refresh` | POST | Trigger manual cache refresh |
+
+**Example: Get all cached tech stocks:**
+```bash
+curl http://localhost:8080/api/v1/cached/lists/top_tech
+```
+
+**Perfect for:**
+- Claude Artifacts (no CSP restrictions on your domain!)
+- Third-party dashboards
+- Real-time stock displays
+- Mobile apps
+
+**Key Features:**
+- ⚡ **Instant responses** - No external API calls
+- 💾 **Persistent cache** - Survives server restarts (SQLite)
+- 🔄 **Auto-refresh** - Background updates every 30 minutes
+- 📉 **Reduced API costs** - 48 calls/day vs 288+
+- 🌐 **CORS enabled** - Works from any domain
+
 ### API Documentation
 
 - Swagger UI: `/docs`

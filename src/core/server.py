@@ -10,7 +10,8 @@ from loguru import logger
 import sys
 
 from src.core.config import settings
-from src.api.routes import health, agents
+from src.api.routes import health, agents, cached
+from src.core.scheduler import get_scheduler
 
 
 # Configure logging - ensure all logs go to stdout for Replit console
@@ -93,6 +94,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include routers
 app.include_router(health.router, tags=["Health"])
 app.include_router(agents.router, prefix=settings.api_prefix, tags=["Agents"])
+app.include_router(cached.router, prefix=f"{settings.api_prefix}/cached", tags=["Cached Data"])
 
 
 # Root endpoint
@@ -115,11 +117,21 @@ async def startup_event():
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"API documentation available at /docs")
 
+    # Start background stock cache scheduler
+    scheduler = get_scheduler()
+    scheduler.start()
+    logger.info("✓ Background stock cache scheduler started")
+
 
 # Shutdown event
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info(f"Shutting down {settings.app_name}")
+
+    # Stop background scheduler
+    scheduler = get_scheduler()
+    scheduler.stop()
+    logger.info("✓ Background scheduler stopped")
 
 
 if __name__ == "__main__":

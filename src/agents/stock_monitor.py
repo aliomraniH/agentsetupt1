@@ -32,6 +32,7 @@ except ImportError:
 
 from src.agents.base import BaseAgent
 from src.core.config import settings
+from src.core.cache import get_cache
 
 
 class StockCategory(str, Enum):
@@ -74,9 +75,9 @@ class StockMonitorAgent(BaseAgent):
 
     def __init__(self):
         super().__init__()
-        self._cache: Dict[str, Any] = {}
-        self._cache_time: Optional[datetime] = None
-        self._cache_ttl = 300  # 5 minutes cache
+        # Use persistent cache with 30-minute TTL
+        self._cache = get_cache()
+        self._cache_ttl = 1800  # 30 minutes cache (changed from 5 minutes)
 
     @property
     def name(self) -> str:
@@ -110,12 +111,18 @@ class StockMonitorAgent(BaseAgent):
             return f"{vol/1e3:.1f}K"
         return f"{vol:,.0f}"
 
-    def _is_cache_valid(self, symbols_key: str) -> bool:
-        """Check if cache is still valid"""
-        if not self._cache_time or symbols_key not in self._cache:
-            return False
-        elapsed = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
-        return elapsed < self._cache_ttl
+    def _get_cached_stocks(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Get cached stock data for multiple symbols.
+        Uses persistent cache that survives server restarts.
+
+        Args:
+            symbols: List of stock symbols
+
+        Returns:
+            Dict mapping symbols to their cached data (only includes valid entries)
+        """
+        return self._cache.get_many(symbols)
 
     async def _fetch_with_alpha_vantage(self, symbols: List[str]) -> Dict[str, Any]:
         """
@@ -918,20 +925,71 @@ Example: 25000000"""
             stock_symbols = STOCK_LISTS["top_tech"]["symbols"]
             list_name = STOCK_LISTS["top_tech"]["name"]
 
-        # Create cache key
-        cache_key = ",".join(sorted(stock_symbols))
+        # Check persistent cache (unless skip_cache is True)
+        if not skip_cache:
+            cached_stocks = self._get_cached_stocks(stock_symbols)
 
-        # Check cache (unless skip_cache is True)
-        if not skip_cache and self._is_cache_valid(cache_key):
-            logger.info(f"[{self.name}] Returning cached data for {list_name}")
-            cached_result = self._cache[cache_key]
-            if debug_metadata:
-                cached_result["_debug"] = {
-                    "cache_used": True,
-                    "cache_age_seconds": (datetime.now(timezone.utc) - self._cache_time).total_seconds(),
-                    "note": "This is cached data. Use ?skip_cache=true to fetch fresh data."
+            # If all requested stocks are cached, return immediately
+            if len(cached_stocks) == len(stock_symbols):
+                logger.info(f"[{self.name}] All {len(stock_symbols)} stocks found in cache for {list_name}")
+
+                # Convert to list maintaining original order
+                results = [cached_stocks[symbol] for symbol in stock_symbols]
+
+                # Sort by change percentage
+                sorted_by_change = sorted(
+                    results,
+                    key=lambda x: x.get("change_percent", 0),
+                    reverse=True
+                )
+
+                # Calculate summary
+                avg_change = (
+                    sum(s.get("change_percent", 0) for s in results) / len(results)
+                    if results else 0
+                )
+
+                gainers = [s for s in results if s.get("change_percent", 0) > 0]
+                losers = [s for s in results if s.get("change_percent", 0) < 0]
+
+                cached_result = {
+                    "list_name": list_name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "is_demo_data": False,
+                    "from_cache": True,
+                    "summary": {
+                        "total_stocks": len(stock_symbols),
+                        "successful": len(results),
+                        "failed": 0,
+                        "gainers": len(gainers),
+                        "losers": len(losers),
+                        "unchanged": len(results) - len(gainers) - len(losers),
+                        "average_change_percent": round(avg_change, 2)
+                    },
+                    "top_gainers": sorted_by_change[:3] if len(sorted_by_change) >= 3 else sorted_by_change,
+                    "top_losers": sorted_by_change[-3:][::-1] if len(sorted_by_change) >= 3 else [],
+                    "stocks": sorted_by_change,
+                    "errors": None
                 }
-            return cached_result
+
+                if format_for_claude:
+                    claude_format = self._format_for_claude(cached_result)
+                    cached_result["claude_summary"] = claude_format["text_summary"]
+
+                if debug_metadata:
+                    cached_result["_debug"] = {
+                        "cache_used": True,
+                        "note": "All data from persistent cache. Use ?skip_cache=true to fetch fresh data."
+                    }
+
+                return cached_result
+            elif cached_stocks:
+                # Partial cache hit - only fetch missing stocks
+                cached_count = len(cached_stocks)
+                logger.info(f"[{self.name}] Partial cache hit: {cached_count}/{len(stock_symbols)} stocks cached")
+                # We'll continue with fresh fetch for all symbols for consistency
+        else:
+            cached_stocks = {}
 
         if skip_cache:
             logger.info(f"[{self.name}] Cache bypassed - fetching fresh data for {list_name}")
@@ -1223,10 +1281,16 @@ Example: 25000000"""
                     logger.warning(f"    ⚠️  {warning}")
             logger.info("="*80 + "\n")
 
-        # Cache the result (but don't cache debug metadata)
-        result_to_cache = {k: v for k, v in result.items() if k != "_debug"}
-        self._cache[cache_key] = result_to_cache
-        self._cache_time = datetime.now(timezone.utc)
+        # Cache successful stocks in persistent storage
+        successful_stocks_dict = {
+            stock["symbol"]: stock
+            for stock in successful
+            if stock.get("status") == "success"
+        }
+
+        if successful_stocks_dict:
+            self._cache.set_many(successful_stocks_dict, ttl_seconds=self._cache_ttl)
+            logger.info(f"✓ Cached {len(successful_stocks_dict)} stocks for {self._cache_ttl}s (30 min)")
 
         return result
 
