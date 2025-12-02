@@ -39,10 +39,10 @@ echo "If the new .replit works fine, you can discard the stash with:"
 echo "  git stash drop"
 echo ""
 
-# Step 6: Install dependencies
-echo "Step 6: Installing dependencies..."
-pip install APScheduler==3.10.4 -q
-echo "✓ APScheduler installed"
+# Step 6: Note about dependencies
+echo "Step 6: Dependencies will auto-install..."
+echo "ℹ️  APScheduler will be installed automatically when you click Run"
+echo "   (Replit uses .replit file to install requirements.txt)"
 echo ""
 
 # Step 7: Create data directory
