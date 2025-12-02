@@ -9,8 +9,8 @@ PYTHONPATH = "${REPL_HOME}"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 [deployment]
-build = ["sh", "-c", "pip install --user -r requirements.txt"]
-run = ["sh", "-c", "python -m uvicorn src.core.server:app --host=0.0.0.0 --port=8080"]
+build = ["bash", "scripts/replit_build.sh"]
+run = ["bash", "-c", "bash scripts/runtime_health_check.sh && python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080"]
 deploymentTarget = "autoscale"
 
 [[ports]]
