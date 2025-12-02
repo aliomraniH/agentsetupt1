@@ -59,9 +59,20 @@ log "Health Check 3: Checking pip configuration..."
 log "Current pip config:"
 pip config list 2>&1 | tee -a "${HEALTH_LOG}" || log "No pip config set"
 
-# Unset any user-site config that might conflict
+# Create a clean pip config to prevent any flag conflicts
+log "Creating clean pip configuration..."
+mkdir -p ~/.config/pip
+cat > ~/.config/pip/pip.conf << 'PIPCONF'
+[install]
+user = false
+PIPCONF
+log "Created ~/.config/pip/pip.conf with user=false"
+
+# Also set environment variables to be extra safe
 export PIP_USER=0
-log "Set PIP_USER=0 to prevent --user flag conflicts"
+export PIP_NO_USER=1
+unset PIP_TARGET
+log "Set PIP_USER=0, PIP_NO_USER=1, unset PIP_TARGET"
 
 # Health Check 4: Check requirements.txt
 log "Health Check 4: Validating requirements.txt..."
@@ -89,8 +100,9 @@ log "Clearing pip cache..."
 pip cache purge 2>&1 | tee -a "${BUILD_LOG}" || log "No cache to clear"
 
 # Install with proper flags (no --user, no conflicts)
-log "Running: pip install --no-warn-script-location -r requirements.txt"
-if pip install --no-warn-script-location -r requirements.txt 2>&1 | tee -a "${BUILD_LOG}"; then
+# Using --no-user explicitly to prevent any user-site installation
+log "Running: pip install --no-user --no-warn-script-location -r requirements.txt"
+if pip install --no-user --no-warn-script-location -r requirements.txt 2>&1 | tee -a "${BUILD_LOG}"; then
     log_success "Dependencies installed successfully"
 else
     log_error "Failed to install dependencies"
