@@ -15,6 +15,7 @@ except ImportError:
 
 from src.agents.base import BaseAgent
 from src.core.config import settings
+from src.core.api_logger import api_logger, ClaudeUsageType
 
 
 class ClaudeModel(str, Enum):
@@ -135,6 +136,13 @@ class ClaudeAgent(BaseAgent):
             "content": message
         })
 
+        # Log external API call to Anthropic
+        api_call = api_logger.log_external_api_call(
+            api_name="Anthropic Claude",
+            endpoint=f"/messages (model: {model})",
+            method="POST"
+        )
+
         # Make API call
         response = await client.messages.create(
             model=model,
@@ -143,6 +151,13 @@ class ClaudeAgent(BaseAgent):
             system=system,
             messages=messages
         )
+
+        # Complete API call log
+        if api_call:
+            api_call.complete(
+                success=True,
+                status_code=200
+            )
 
         # Extract response
         assistant_message = response.content[0].text
@@ -213,6 +228,13 @@ class ClaudeAgent(BaseAgent):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 use_history=use_conversation_history
+            )
+
+            # Log Claude usage (default to passthrough, can be overridden by caller)
+            api_logger.log_claude_usage(
+                usage_type=ClaudeUsageType.PASSTHROUGH,
+                model=result["model"],
+                tokens=result["usage"]["total_tokens"]
             )
 
             return {

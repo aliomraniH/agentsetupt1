@@ -10,7 +10,8 @@ from loguru import logger
 import sys
 
 from src.core.config import settings
-from src.api.routes import health, agents
+from src.api.routes import health, agents, logging, embedded_ai
+from src.core.api_logger import api_logger
 
 
 # Configure logging - ensure all logs go to stdout for Replit console
@@ -58,22 +59,50 @@ app.add_middleware(
 )
 
 
-# Request logging middleware
+# Request logging middleware with comprehensive API tracking
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log all incoming requests for debugging visibility in Replit console"""
-    logger.info(f"📥 Incoming request: {request.method} {request.url.path}")
+    """
+    Enhanced request logging with comprehensive API tracking.
+
+    Tracks:
+    - Request source (client app, user agent, IP)
+    - API call chains
+    - External API usage
+    - Claude AI usage patterns
+    - Performance metrics
+    """
+    # Extract client IP
+    client_ip = request.client.host if request.client else None
+
+    # Create request context for tracking
+    context = api_logger.create_request_context(
+        method=request.method,
+        path=request.url.path,
+        headers=dict(request.headers),
+        query_params=dict(request.query_params),
+        ip_address=client_ip
+    )
 
     # Process the request
-    start_time = datetime.now(timezone.utc)
-    response = await call_next(request)
-    end_time = datetime.now(timezone.utc)
+    try:
+        response = await call_next(request)
 
-    # Log response
-    duration_ms = (end_time - start_time).total_seconds() * 1000
-    logger.info(f"📤 Response: {response.status_code} | {duration_ms:.0f}ms")
+        # Complete the request tracking
+        api_logger.complete_request(
+            status_code=response.status_code,
+            response_size=None  # Could be enhanced to track response size
+        )
 
-    return response
+        return response
+
+    except Exception as e:
+        # Log error
+        api_logger.complete_request(
+            status_code=500,
+            error=str(e)
+        )
+        raise
 
 
 # Global exception handler
@@ -93,6 +122,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include routers
 app.include_router(health.router, tags=["Health"])
 app.include_router(agents.router, prefix=settings.api_prefix, tags=["Agents"])
+app.include_router(logging.router, prefix=f"{settings.api_prefix}/logging", tags=["Logging & Monitoring"])
+app.include_router(embedded_ai.router, prefix=f"{settings.api_prefix}/embedded-ai", tags=["Embedded AI"])
 
 
 # Root endpoint

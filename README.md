@@ -28,7 +28,50 @@ python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload
 2. Click "Run" - it will automatically start the FastAPI server
 3. Access the API at your Replit URL
 
+## New Features 🎉
+
+### API Logging & Tracking System
+
+Comprehensive logging system that tracks:
+- **Request Sources**: Identify which applications/clients make requests
+- **API Call Chains**: See complete sequence of external API calls
+- **Claude AI Usage**: Track embedded vs external AI usage
+- **Performance Metrics**: Response times, success rates, bottlenecks
+
+📖 **Full Documentation**: See [API_LOGGING_GUIDE.md](./API_LOGGING_GUIDE.md)
+
+### Embedded AI Endpoints
+
+New endpoints specifically designed for third-party applications that want to use our embedded Claude AI:
+- `/api/v1/embedded-ai/stocks/query` - Stock data with AI summary
+- `/api/v1/embedded-ai/news/query` - News with AI analysis
+- `/api/v1/embedded-ai/analyze` - Custom data analysis
+- `/api/v1/embedded-ai/stocks/quick` - Quick stock check (GET)
+
+**Use Case**: Instead of managing your own LLM, use our embedded Claude for analysis.
+
 ## API Endpoints
+
+### Logging & Monitoring
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/logging/stats` | GET | Comprehensive API usage statistics |
+| `/api/v1/logging/recent` | GET | Recent request logs |
+| `/api/v1/logging/sources` | GET | Breakdown by request source |
+| `/api/v1/logging/external-apis` | GET | External API usage stats |
+| `/api/v1/logging/claude-usage` | GET | Claude AI usage patterns |
+| `/api/v1/logging/api-sequences` | GET | API call chain sequences |
+
+### Embedded AI
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/embedded-ai/stocks/query` | POST | Stock data with AI summary |
+| `/api/v1/embedded-ai/stocks/quick` | GET | Quick stock check |
+| `/api/v1/embedded-ai/news/query` | POST | News with AI analysis |
+| `/api/v1/embedded-ai/analyze` | POST | Analyze custom data |
+| `/api/v1/embedded-ai/info` | GET | Embedded AI info |
 
 ### Health Checks
 
@@ -62,6 +105,7 @@ python -m uvicorn src.core.server:app --host 0.0.0.0 --port 8080 --reload
 - Swagger UI: `/docs`
 - ReDoc: `/redoc`
 - OpenAPI JSON: `/openapi.json`
+- API Logging Guide: [API_LOGGING_GUIDE.md](./API_LOGGING_GUIDE.md)
 
 ## Available Agents
 
@@ -134,6 +178,22 @@ stocks=$(curl http://localhost:8080/api/v1/agents/stock-monitor/quick)
 curl -X POST http://localhost:8080/api/v1/agents/claude-assistant/analyze \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"Analyze this stock data: $stocks\"}"
+
+# Use embedded AI for stock analysis (includes AI summary automatically)
+curl -X POST http://localhost:8080/api/v1/embedded-ai/stocks/query \
+  -H "Content-Type: application/json" \
+  -H "X-Client-ID: my-app" \
+  -d '{
+    "symbols": ["AAPL", "GOOGL"],
+    "include_ai_summary": true,
+    "query_context": "What are tech stocks doing today?"
+  }'
+
+# View API usage statistics
+curl http://localhost:8080/api/v1/logging/stats?last_n=100
+
+# Check Claude usage breakdown
+curl http://localhost:8080/api/v1/logging/claude-usage?last_n=100
 ```
 
 ## GitHub Actions

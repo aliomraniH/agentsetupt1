@@ -32,6 +32,7 @@ except ImportError:
 
 from src.agents.base import BaseAgent
 from src.core.config import settings
+from src.core.api_logger import api_logger, APICallType
 
 
 class StockCategory(str, Enum):
@@ -157,7 +158,22 @@ class StockMonitorAgent(BaseAgent):
                         "apikey": settings.alpha_vantage_api_key
                     }
 
+                    # Log external API call
+                    api_call = api_logger.log_external_api_call(
+                        api_name="Alpha Vantage",
+                        endpoint=f"/query?function=GLOBAL_QUOTE&symbol={symbol}",
+                        method="GET"
+                    )
+
                     response = await client.get(url, params=params)
+
+                    # Complete the API call log
+                    if api_call:
+                        api_call.complete(
+                            success=response.status_code == 200,
+                            status_code=response.status_code,
+                            response_size=len(response.content) if response.content else None
+                        )
                     response.raise_for_status()
                     data = response.json()
 
@@ -298,6 +314,13 @@ class StockMonitorAgent(BaseAgent):
                 step1_prompt = f"""Search for stock ticker symbol {symbol}. What is the full company name?
 Reply with ONLY the company name, no other text."""
 
+                # Log external API call
+                api_call = api_logger.log_external_api_call(
+                    api_name="Perplexity",
+                    endpoint=f"/chat/completions (verify {symbol})",
+                    method="POST"
+                )
+
                 step1_response = await client.chat.completions.create(
                     model="llama-3.1-sonar-small-128k-online",
                     messages=[
@@ -307,6 +330,9 @@ Reply with ONLY the company name, no other text."""
                     temperature=0.0,
                     max_tokens=100
                 )
+
+                if api_call:
+                    api_call.complete(success=True, status_code=200)
                 company_name = step1_response.choices[0].message.content.strip()
                 logger.info(f"  ✓ Step 1: {symbol} = {company_name}")
 
@@ -320,6 +346,12 @@ Reply with ONLY the company name, no other text."""
 Reply with ONLY two numbers separated by a comma: current_price,previous_close
 Example: 150.25,148.50"""
 
+                api_call = api_logger.log_external_api_call(
+                    api_name="Perplexity",
+                    endpoint=f"/chat/completions (prices {symbol})",
+                    method="POST"
+                )
+
                 step2_response = await client.chat.completions.create(
                     model="llama-3.1-sonar-small-128k-online",
                     messages=[
@@ -329,6 +361,9 @@ Example: 150.25,148.50"""
                     temperature=0.0,
                     max_tokens=50
                 )
+
+                if api_call:
+                    api_call.complete(success=True, status_code=200)
                 prices_text = step2_response.choices[0].message.content.strip()
                 logger.info(f"  ✓ Step 2: Prices = {prices_text}")
 
@@ -352,6 +387,12 @@ Example: 150.25,148.50"""
 Reply with ONLY the volume number, no other text.
 Example: 25000000"""
 
+                api_call = api_logger.log_external_api_call(
+                    api_name="Perplexity",
+                    endpoint=f"/chat/completions (volume {symbol})",
+                    method="POST"
+                )
+
                 step3_response = await client.chat.completions.create(
                     model="llama-3.1-sonar-small-128k-online",
                     messages=[
@@ -361,6 +402,9 @@ Example: 25000000"""
                     temperature=0.0,
                     max_tokens=50
                 )
+
+                if api_call:
+                    api_call.complete(success=True, status_code=200)
                 volume_text = step3_response.choices[0].message.content.strip()
                 logger.info(f"  ✓ Step 3: Volume = {volume_text}")
 
