@@ -8,18 +8,26 @@ Replit automatically installs dependencies when you click Run. No manual pip ins
 
 ## 📋 Step-by-Step Instructions
 
-### **Step 1: Pull the Code**
+### **Step 1: Pull the Code (handles divergent branches)**
 
 In your Replit Shell, run:
 
 ```bash
-# Stash any local changes (like .replit modifications)
+# 1) Tell git how to reconcile if histories diverge (rebase keeps history clean)
+git config pull.rebase true
+
+# 2) Stash any local changes (like .replit modifications)
 git stash
 
-# Fetch and checkout the optimization branch
+# 3) Fetch and checkout the optimization branch
 git fetch origin
 git checkout claude/optimize-api-memory-017vafomh7apzPdAvRf7G1Ew
-git pull origin claude/optimize-api-memory-017vafomh7apzPdAvRf7G1Ew
+
+# 4) Pull with the chosen strategy (matching the config above)
+git pull --rebase origin claude/optimize-api-memory-017vafomh7apzPdAvRf7G1Ew
+
+# 5) Restore your stashed tweaks if you had any
+git stash pop || true
 ```
 
 ---
@@ -49,6 +57,27 @@ That's it! Replit will automatically:
 4. ✅ Start the server with background scheduler
 
 **No manual pip install needed!** The `.replit` file handles everything.
+
+---
+
+### **Step 3b: Refresh Replit after pulling updates**
+
+If Replit cached an older build, refresh it with the same safe commands used by the build step:
+
+```bash
+# Recreate the virtual environment with the repo's script (avoids --user/--target conflicts)
+bash scripts/replit_build.sh
+
+# Then click Run again
+```
+
+If you still see a pip flag error, open the **Shell** and use one explicit install without mixing flags:
+
+```bash
+PIP_USER=0 pip install --no-user APScheduler==3.10.4
+```
+
+This matches the deployed dependencies without triggering the `--user` + `--target` conflict.
 
 ---
 
@@ -109,15 +138,20 @@ All these endpoints serve **instant cached data** (no external API calls):
 
 **Cause:** Dependencies not installed automatically.
 
-**Fix:** The `.replit` file should handle this, but if not:
+**Fix:** The `.replit` file should handle this, but if not use one of these safe options (no `--user/--target` mixups):
 
 ```bash
-# Option 1: Use pip with --user flag (Replit-friendly)
-pip install --user APScheduler==3.10.4
+# Option 1: Run the build script locally (preferred)
+bash scripts/replit_build.sh
 
-# Option 2: Use the Replit Packages UI
+# Option 2: Install directly without --user or --target
+PIP_USER=0 pip install --no-user APScheduler==3.10.4
+
+# Option 3: Use the Replit Packages UI
 # Click "Packages" icon (📦) → Search "APScheduler" → Install
 ```
+
+> ⚠️ Avoid commands that combine `--user` with `--target`; pip will fail with "incompatible pip flags" during deployment.
 
 ---
 
